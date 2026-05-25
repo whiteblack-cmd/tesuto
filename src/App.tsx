@@ -2,22 +2,23 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Anchor,
   Ban,
+  Bomb,
   Bot,
   CircleHelp,
   CirclePlus,
-  Crosshair,
   Flag,
   Flame,
   Gauge,
-  Magnet,
+  Link2,
   Menu,
+  Network,
   RotateCcw,
   Settings,
   Shield,
   Sparkle,
-  Shuffle,
+  TriangleAlert,
   Users,
-  Zap,
+  VolumeX,
 } from 'lucide-react'
 import './App.css'
 
@@ -33,13 +34,13 @@ type PieceType =
   | 'DROP'
   | 'CHARGE'
   | 'DAMAGE'
-  | 'CROSS'
-  | 'DIAGONAL'
-  | 'DRAIN'
-  | 'FORT'
-  | 'BLOOM'
+  | 'SILENCE'
+  | 'TRAP'
+  | 'GUARDIAN'
+  | 'MINEFIELD'
+  | 'SNARE'
 type SpecialPiece = Exclude<PieceType, 'NORMAL'>
-type StatusType = 'GUARD' | 'WARD' | 'CHARGE'
+type StatusType = 'GUARD' | 'WARD' | 'CHARGE' | 'SILENCE' | 'TRAP'
 type Coord = { x: number; y: number }
 type Direction = { dx: number; dy: number; key: string }
 
@@ -85,7 +86,19 @@ type MatchEvent = {
 
 type VisualEffect = {
   coord: Coord
-  type: 'flip' | 'guard' | 'ward' | 'block' | 'place' | 'charge' | 'combo' | 'damage'
+  type:
+    | 'flip'
+    | 'guard'
+    | 'ward'
+    | 'block'
+    | 'place'
+    | 'charge'
+    | 'combo'
+    | 'damage'
+    | 'silence'
+    | 'silence-end'
+    | 'trap'
+    | 'trap-trigger'
 }
 
 type SpecialResult = {
@@ -107,6 +120,14 @@ type PendingBarrier = {
   comboLabel?: string
 }
 
+type PendingTrap = {
+  move: Coord
+  baseTrapped: Coord[]
+  selected: Coord[]
+  captured: number
+  comboLabel?: string
+}
+
 type MatchState = {
   board: Cell[]
   currentPlayer: Player
@@ -119,6 +140,12 @@ type MatchState = {
   visualEffects: VisualEffect[]
   placementBlocks: PlacementBlock[]
   damageCells: DamageCell[]
+  silenceZones: SilenceZone[]
+  cooldowns: Record<Player, Partial<Record<SpecialPiece, number>>>
+  trapLockPending: Record<Player, number>
+  trapLockActive: Record<Player, boolean>
+  damageCostPending: Record<Player, number>
+  damageCostActive: Record<Player, boolean>
 }
 
 type PlacementBlock = {
@@ -130,6 +157,13 @@ type PlacementBlock = {
 type DamageCell = {
   coord: Coord
   damageFor: Player
+  silenceExpiresAtTurn?: number
+}
+
+type SilenceZone = {
+  coords: Coord[]
+  silencedPlayer: Player
+  expiresAtTurn: number
 }
 
 const boardSize = 8
@@ -140,11 +174,11 @@ const specialPieces: SpecialPiece[] = [
   'BARRIER',
   'CHARGE',
   'DAMAGE',
-  'DRAIN',
-  'FORT',
-  'BLOOM',
-  'CROSS',
-  'DIAGONAL',
+  'TRAP',
+  'GUARDIAN',
+  'MINEFIELD',
+  'SNARE',
+  'SILENCE',
   'BLAST',
   'LANCE',
 ]
@@ -164,18 +198,18 @@ const maxSpecialPoints = 5
 
 const specialCost: Record<PieceType, number> = {
   NORMAL: 0,
-  LANCE: 4,
-  CHARGE: 2,
+  LANCE: 5,
+  CHARGE: 4,
   BLAST: 3,
-  BARRIER: 2,
+  BARRIER: 3,
   SEAL: 1,
   DROP: 1,
   DAMAGE: 2,
-  CROSS: 2,
-  DIAGONAL: 2,
-  DRAIN: 1,
-  FORT: 2,
-  BLOOM: 2,
+  SILENCE: 2,
+  TRAP: 3,
+  GUARDIAN: 5,
+  MINEFIELD: 4,
+  SNARE: 5,
 }
 
 const comboPieces = new Set<PieceType>([
@@ -184,11 +218,8 @@ const comboPieces = new Set<PieceType>([
   'BARRIER',
   'BLAST',
   'DAMAGE',
-  'CROSS',
-  'DIAGONAL',
-  'DRAIN',
-  'FORT',
-  'BLOOM',
+  'SILENCE',
+  'TRAP',
 ])
 
 const pieceInfo: Record<
@@ -248,43 +279,43 @@ const pieceInfo: Record<
     label: 'ダメージ',
     short: 'G',
     tone: 'damage',
-    summary: '相手が置くとSPを失うマスを作ります。',
-    hint: '配置時、上下左右4マスの空きマスをダメージマスにします。相手がそのマスに石を置くと、相手のSPを2減少させます。コンボ時はランダムな空きマス1つをダメージマスにします。',
+    summary: '相手の能力コストを上げるマスを作ります。',
+    hint: '配置時、周囲8マスの空きマスをダメージマスにします。相手がそのマスに石を置くと、相手の次のターンは能力の使用コストが+1されます。コンボ時は自分のダメージマスの周囲にある空きマス1つへダメージマスを広げます。',
   },
-  CROSS: {
-    label: 'クロス',
-    short: 'X',
-    tone: 'cross',
-    summary: '上下左右の射線で最初の相手石を返します。',
-    hint: '配置した石から上下左右へ射線を伸ばし、各方向で最初に見つかった相手石を追加で返します。離れた石にも届く制圧型の能力です。',
+  SILENCE: {
+    label: 'サイレンス',
+    short: 'Q',
+    tone: 'silence',
+    summary: '相手の能力と盤面効果を一時的に封印します。',
+    hint: '配置時、円形範囲20マスにある相手の能力駒、バリア、罠、自分に効く相手のダメージマスを、相手のターン終了時まで封印します。封印範囲内に相手の能力駒が新たに置かれた場合も、その能力は無効になります。コンボ時も同じ効果が発動します。',
   },
-  DIAGONAL: {
-    label: 'ダイア',
-    short: 'I',
-    tone: 'diagonal',
-    summary: '斜めライン上の相手石をまとめて返します。',
-    hint: '配置した石から斜め4方向へ伸びるライン上の相手石をすべて追加で返します。角へ伸びる長い斜線で大きな逆転を狙えます。',
+  TRAP: {
+    label: 'トラップ',
+    short: 'T',
+    tone: 'trap',
+    summary: '返されると相手の次ターンを妨害します。',
+    hint: '置いた駒自身と追加で選んだ自分の駒2つに罠を付与します。相手が罠付き駒を返すと、相手の次ターンはSP自然回復が止まり、能力も使用不可になります。罠は一度返されると消えます。コンボ時は自分のランダムな駒1つに罠を付与します。',
   },
-  DRAIN: {
-    label: 'ドレイン',
-    short: 'V',
-    tone: 'drain',
-    summary: '相手SPを最大2奪って自分のSPにします。',
-    hint: '配置後、相手のSPを最大2減らし、減らした分だけ自分のSPを回復します。相手がSP0なら自分だけSPを1回復します。',
+  GUARDIAN: {
+    label: 'ガーディアン',
+    short: 'U',
+    tone: 'guardian',
+    summary: '存在中、自ターン終了時にバリアを付与します。',
+    hint: 'この駒が自分の色で盤上に存在する限り、自分のターン終了時にランダムな自分の駒2つへバリアを付与します。封印中は発動しません。',
   },
-  FORT: {
-    label: 'フォート',
-    short: 'F',
-    tone: 'fort',
-    summary: '周囲を守り、前後左右を危険地帯にします。',
-    hint: '置いた石と周囲8マスの自分石にバリアを付与し、さらに上下左右の空きマスを相手用ダメージマスにします。拠点を作る能力です。',
-  },
-  BLOOM: {
-    label: 'ブルーム',
+  MINEFIELD: {
+    label: 'マイン',
     short: 'M',
-    tone: 'bloom',
-    summary: '周囲に自分の石を最大3つ増やします。',
-    hint: '配置後、周囲8マスの空きマスから最大3つ選び、自分の通常石を追加配置します。追加された石からも連鎖反転が発生します。',
+    tone: 'minefield',
+    summary: '存在中、自ターン終了時にダメージマスを作ります。',
+    hint: 'この駒が自分の色で盤上に存在する限り、自分のターン終了時にランダムな空きマス1つを相手用ダメージマスにします。封印中は発動しません。',
+  },
+  SNARE: {
+    label: 'スネア',
+    short: 'E',
+    tone: 'snare',
+    summary: '存在中、自ターン終了時に通常駒へ罠を付けます。',
+    hint: 'この駒が自分の色で盤上に存在する限り、自分のターン終了時に能力を持たない自分の駒1つへ罠を付与します。封印中は発動しません。',
   },
 }
 
@@ -330,6 +361,12 @@ function createInitialState(): MatchState {
     visualEffects: [],
     placementBlocks: [],
     damageCells: [],
+    silenceZones: [],
+    cooldowns: { BLACK: {}, WHITE: {} },
+    trapLockPending: { BLACK: 0, WHITE: 0 },
+    trapLockActive: { BLACK: false, WHITE: false },
+    damageCostPending: { BLACK: 0, WHITE: 0 },
+    damageCostActive: { BLACK: false, WHITE: false },
   }
 }
 
@@ -342,11 +379,11 @@ function createReserve(): Reserve {
     DROP: 0,
     CHARGE: 0,
     DAMAGE: 0,
-    CROSS: 0,
-    DIAGONAL: 0,
-    DRAIN: 0,
-    FORT: 0,
-    BLOOM: 0,
+    SILENCE: 0,
+    TRAP: 0,
+    GUARDIAN: 0,
+    MINEFIELD: 0,
+    SNARE: 0,
   }
 }
 
@@ -437,16 +474,75 @@ function canUsePiece(state: MatchState, player: Player, piece: PieceType) {
     return true
   }
 
-  return state.specialPoints[player] >= specialCost[piece]
+  return (
+    !state.trapLockActive[player] &&
+    state.specialPoints[player] >= getEffectiveSpecialCost(state, player, piece) &&
+    getCooldownRemaining(state, player, piece) === 0
+  )
+}
+
+function getEffectiveSpecialCost(state: MatchState, player: Player, piece: PieceType) {
+  if (piece === 'NORMAL') {
+    return 0
+  }
+
+  return specialCost[piece] + (state.damageCostActive[player] ? 1 : 0)
+}
+
+function getCooldownRemaining(state: MatchState, player: Player, piece: SpecialPiece) {
+  return state.cooldowns[player][piece] ?? 0
+}
+
+function spendSpecialCostAndSetCooldown(state: MatchState, player: Player, piece: SpecialPiece) {
+  state.specialPoints[player] -= getEffectiveSpecialCost(state, player, piece)
+  state.cooldowns[player] = {
+    ...state.cooldowns[player],
+    [piece]: specialCost[piece] + 1,
+  }
+}
+
+function tickCooldowns(state: MatchState, player: Player) {
+  state.cooldowns[player] = Object.fromEntries(
+    Object.entries(state.cooldowns[player])
+      .map(([piece, turns]) => [piece, Math.max(0, (turns ?? 0) - 1)])
+      .filter(([, turns]) => Number(turns) > 0),
+  ) as Partial<Record<SpecialPiece, number>>
+}
+
+function applyTrapPenalty(state: MatchState, player: Player, coord?: Coord) {
+  state.trapLockPending[player] = 1
+  if (coord) {
+    state.visualEffects = [...state.visualEffects, { coord, type: 'trap-trigger' }]
+  }
+}
+
+function applyDamageCostPenalty(state: MatchState, player: Player) {
+  state.damageCostPending[player] = 1
 }
 
 function hasBlockingWard(disc: Disc, turn: number) {
+  if (hasSilence(disc, turn)) {
+    return false
+  }
+
   return disc.statuses.some(
     (status) => status.type === 'WARD' && status.expiresAtTurn !== undefined && turn <= status.expiresAtTurn,
   )
 }
 
-function tryFlip(board: Cell[], coord: Coord, attacker: Player, turn: number) {
+function hasSilence(disc: Disc, turn: number) {
+  return disc.statuses.some(
+    (status) => status.type === 'SILENCE' && status.expiresAtTurn !== undefined && turn <= status.expiresAtTurn,
+  )
+}
+
+function tryFlip(
+  board: Cell[],
+  coord: Coord,
+  attacker: Player,
+  turn: number,
+  onTrapTriggered?: (player: Player, coord: Coord) => void,
+) {
   const disc = getCell(board, coord).disc
 
   if (!disc || disc.owner === attacker || isCorner(coord)) {
@@ -457,9 +553,10 @@ function tryFlip(board: Cell[], coord: Coord, attacker: Player, turn: number) {
     return false
   }
 
-  const guard = disc.statuses.find(
-    (status) => status.type === 'GUARD' && (status.charges ?? 0) > 0,
-  )
+  const isSilenced = hasSilence(disc, turn)
+  const guard = isSilenced
+    ? undefined
+    : disc.statuses.find((status) => status.type === 'GUARD' && (status.charges ?? 0) > 0)
 
   if (guard) {
     guard.charges = 0
@@ -469,13 +566,19 @@ function tryFlip(board: Cell[], coord: Coord, attacker: Player, turn: number) {
     return false
   }
 
+  const trapTriggered = !isSilenced && disc.statuses.some((status) => status.type === 'TRAP')
   disc.owner = attacker
+  if (trapTriggered) {
+    onTrapTriggered?.(attacker, coord)
+  }
   for (const status of disc.statuses) {
     if (status.type === 'CHARGE') {
       status.resolveAtTurn = turn + 1
     }
   }
-  disc.statuses = disc.statuses.filter((status) => status.type !== 'WARD')
+  disc.statuses = disc.statuses.filter(
+    (status) => status.type !== 'GUARD' && status.type !== 'WARD' && status.type !== 'TRAP',
+  )
   return true
 }
 
@@ -500,12 +603,18 @@ function findChainFlips(board: Cell[], player: Player, origin: Coord) {
   return flips
 }
 
-function applyChainFlips(board: Cell[], player: Player, origins: Coord[], turn: number) {
+function applyChainFlips(
+  board: Cell[],
+  player: Player,
+  origins: Coord[],
+  turn: number,
+  onTrapTriggered?: (player: Player, coord: Coord) => void,
+) {
   const flipped: Coord[] = []
 
   for (const origin of origins) {
     for (const target of findChainFlips(board, player, origin)) {
-      if (tryFlip(board, target, player, turn)) {
+      if (tryFlip(board, target, player, turn, onTrapTriggered)) {
         flipped.push(target)
       }
     }
@@ -517,25 +626,53 @@ function applyChainFlips(board: Cell[], player: Player, origins: Coord[], turn: 
 function applyPlaceAction(state: MatchState, piece: PieceType, move: MoveResult) {
   const next = cloneState(state)
   const player = next.currentPlayer
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(next, targetPlayer, coord)
   const placedCell = getCell(next.board, move)
   placedCell.disc = createDisc(player, piece)
-  const damage = applyDamageCellTrigger(next, move, player)
+  const counterSilence =
+    piece === 'SILENCE' ? counterSilenceZonesAt(next, move, player) : { count: 0, label: '', effects: [] }
+  const zoneSilence = piece === 'SILENCE' ? { count: 0, label: '', effects: [] } : applySilenceZonesToCoord(next, move)
+  const placedDisc = getCell(next.board, move).disc
+  const placedSilenced = Boolean(placedDisc && hasSilence(placedDisc, next.turn))
+  const earlySpecial =
+    piece === 'SILENCE' && !placedSilenced
+      ? resolveSpecialEffect(next, piece, move)
+      : { count: 0, label: '', effects: [] }
+  const comboOriginsBeforeFlip = getPlacementComboOrigins(next, move)
+  const preFlipComboSilence = resolvePreFlipSilenceCombos(next, comboOriginsBeforeFlip)
+  const damage =
+    piece === 'SILENCE'
+      ? clearDamageCellAt(next, move)
+      : applyDamageCellTrigger(next, move, player)
 
   const flippedByRule: Coord[] = []
   for (const line of move.captured) {
     for (const coord of line.coords) {
-      if (tryFlip(next.board, coord, player, next.turn)) {
+      if (tryFlip(next.board, coord, player, next.turn, onTrapTriggered)) {
         flippedByRule.push(coord)
       }
     }
   }
 
-  const special = resolveSpecialEffect(next, piece, move)
-  const combo = resolveComboEffects(next, move)
-  next.visualEffects = [...damage.effects, ...special.effects, ...combo.effects]
+  const special = placedSilenced
+    ? { count: 0, label: piece !== 'NORMAL' ? 'Silenced on entry' : '', effects: [] }
+    : piece === 'SILENCE'
+    ? earlySpecial
+    : resolveSpecialEffect(next, piece, move)
+  const combo = resolveComboEffectsFromOrigins(next, comboOriginsBeforeFlip, preFlipComboSilence.origins)
+  next.visualEffects = [
+    ...next.visualEffects,
+    ...counterSilence.effects,
+    ...zoneSilence.effects,
+    ...special.effects,
+    ...preFlipComboSilence.effects,
+    ...damage.effects,
+    ...flippedByRule.map((coord) => ({ coord, type: 'flip' as const })),
+    ...combo.effects,
+  ]
 
   if (piece !== 'NORMAL') {
-    next.specialPoints[player] -= specialCost[piece]
+    spendSpecialCostAndSetCooldown(next, player, piece)
   }
 
   next.events = [
@@ -545,7 +682,9 @@ function applyPlaceAction(state: MatchState, piece: PieceType, move: MoveResult)
       piece,
       at: { x: move.x, y: move.y },
       captured: flippedByRule.length + special.count + combo.count,
-      special: [damage.label, special.label, combo.label].filter(Boolean).join(' / '),
+      special: [damage.label, counterSilence.label, zoneSilence.label, special.label, preFlipComboSilence.label, combo.label]
+        .filter(Boolean)
+        .join(' / '),
     },
     ...next.events,
   ].slice(0, 8)
@@ -557,24 +696,30 @@ function applyPlaceAction(state: MatchState, piece: PieceType, move: MoveResult)
 function applyBarrierPlacementStart(state: MatchState, move: MoveResult) {
   const next = cloneState(state)
   const player = next.currentPlayer
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(next, targetPlayer, coord)
   const placedCell = getCell(next.board, move)
   placedCell.disc = createDisc(player, 'BARRIER')
+  const comboOriginsBeforeFlip = getPlacementComboOrigins(next, move)
+  const preFlipComboSilence = resolvePreFlipSilenceCombos(next, comboOriginsBeforeFlip)
   const damage = applyDamageCellTrigger(next, move, player)
 
   const flippedByRule: Coord[] = []
   for (const line of move.captured) {
     for (const coord of line.coords) {
-      if (tryFlip(next.board, coord, player, next.turn)) {
+      if (tryFlip(next.board, coord, player, next.turn, onTrapTriggered)) {
         flippedByRule.push(coord)
       }
     }
   }
 
   const baseWarded = applyBaseBarrier(next, move)
-  const combo = resolveComboEffects(next, move)
-  next.specialPoints[player] -= specialCost.BARRIER
+  const combo = resolveComboEffectsFromOrigins(next, comboOriginsBeforeFlip, preFlipComboSilence.origins)
+  spendSpecialCostAndSetCooldown(next, player, 'BARRIER')
   next.visualEffects = [
+    ...next.visualEffects,
+    ...preFlipComboSilence.effects,
     ...damage.effects,
+    ...flippedByRule.map((coord) => ({ coord, type: 'flip' as const })),
     ...baseWarded.map((coord) => ({ coord, type: 'guard' as const })),
     ...combo.effects,
   ]
@@ -586,7 +731,50 @@ function applyBarrierPlacementStart(state: MatchState, move: MoveResult) {
       baseWarded,
       selected: [],
       captured: flippedByRule.length + combo.count,
-      comboLabel: [damage.label, combo.label].filter(Boolean).join(' / '),
+      comboLabel: [damage.label, preFlipComboSilence.label, combo.label].filter(Boolean).join(' / '),
+    },
+  }
+}
+
+function applyTrapPlacementStart(state: MatchState, move: MoveResult) {
+  const next = cloneState(state)
+  const player = next.currentPlayer
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(next, targetPlayer, coord)
+  const placedCell = getCell(next.board, move)
+  placedCell.disc = createDisc(player, 'TRAP')
+  const comboOriginsBeforeFlip = getPlacementComboOrigins(next, move)
+  const preFlipComboSilence = resolvePreFlipSilenceCombos(next, comboOriginsBeforeFlip)
+  const damage = applyDamageCellTrigger(next, move, player)
+
+  const flippedByRule: Coord[] = []
+  for (const line of move.captured) {
+    for (const coord of line.coords) {
+      if (tryFlip(next.board, coord, player, next.turn, onTrapTriggered)) {
+        flippedByRule.push(coord)
+      }
+    }
+  }
+
+  const baseTrapped = applyBaseTrap(next, move)
+  const combo = resolveComboEffectsFromOrigins(next, comboOriginsBeforeFlip, preFlipComboSilence.origins)
+  spendSpecialCostAndSetCooldown(next, player, 'TRAP')
+  next.visualEffects = [
+    ...next.visualEffects,
+    ...preFlipComboSilence.effects,
+    ...damage.effects,
+    ...flippedByRule.map((coord) => ({ coord, type: 'flip' as const })),
+    ...baseTrapped.map((coord) => ({ coord, type: 'trap' as const })),
+    ...combo.effects,
+  ]
+
+  return {
+    next,
+    pending: {
+      move: { x: move.x, y: move.y },
+      baseTrapped,
+      selected: [],
+      captured: flippedByRule.length + combo.count,
+      comboLabel: [damage.label, preFlipComboSilence.label, combo.label].filter(Boolean).join(' / '),
     },
   }
 }
@@ -619,21 +807,57 @@ function finishBarrierSelection(state: MatchState, pending: PendingBarrier) {
   return next
 }
 
+function finishTrapSelection(state: MatchState, pending: PendingTrap) {
+  const next = cloneState(state)
+  const player = next.currentPlayer
+  const selected = pending.selected.filter((coord) => {
+    const disc = getCell(next.board, coord).disc
+    return disc?.owner === player
+  })
+
+  for (const coord of selected) {
+    addTrap(next, coord)
+  }
+
+  const trapped = uniqueCoords([...pending.baseTrapped, ...selected])
+  next.visualEffects = trapped.map((coord) => ({ coord, type: 'trap' }))
+  const event: MatchEvent = {
+    turn: next.turn,
+    player,
+    piece: 'TRAP',
+    at: pending.move,
+    captured: pending.captured,
+    special: pending.comboLabel ? `Trap x${trapped.length} / ${pending.comboLabel}` : `Trap x${trapped.length}`,
+  }
+  next.events = [event, ...next.events].slice(0, 8)
+
+  advanceTurn(next)
+  return next
+}
+
 function applyDirectReverseAction(state: MatchState, target: Coord) {
   const next = cloneState(state)
   const player = next.currentPlayer
-  const flipped = canSpecialFlip(next.board, target, player, next.turn)
-    ? tryFlip(next.board, target, player, next.turn)
-    : false
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(next, targetPlayer, coord)
+  const canFlip = canSpecialFlip(next.board, target, player, next.turn)
+  const comboOriginsBeforeFlip = canFlip ? getComboOriginsFromFlank(next, [target]) : []
+  const preFlipComboSilence = canFlip
+    ? resolvePreFlipSilenceCombos(next, comboOriginsBeforeFlip)
+    : { count: 0, label: '', effects: [], origins: [] }
+  const flipped = canFlip ? tryFlip(next.board, target, player, next.turn, onTrapTriggered) : false
   const comboOrigins = flipped ? getComboOriginsFromFlank(next, [target]) : []
-  const chainFlips = flipped ? applyChainFlips(next.board, player, [target], next.turn) : []
-  const combo = flipped ? resolveComboEffectsFromOrigins(next, comboOrigins) : { count: 0, label: '', effects: [] }
+  const chainFlips = flipped ? applyChainFlips(next.board, player, [target], next.turn, onTrapTriggered) : []
+  const combo = flipped
+    ? resolveComboEffectsFromOrigins(next, comboOrigins, preFlipComboSilence.origins)
+    : { count: 0, label: '', effects: [] }
 
   if (flipped) {
-    next.specialPoints[player] -= specialCost.LANCE
+    spendSpecialCostAndSetCooldown(next, player, 'LANCE')
   }
 
   next.visualEffects = [
+    ...next.visualEffects,
+    ...preFlipComboSilence.effects,
     ...(flipped ? [{ coord: target, type: 'flip' as const }] : []),
     ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
     ...combo.effects,
@@ -646,7 +870,8 @@ function applyDirectReverseAction(state: MatchState, target: Coord) {
     captured: (flipped ? 1 : 0) + chainFlips.length + combo.count,
     special: flipped
       ? `Reverse +${coordLabel(target)}${chainFlips.length > 0 ? ` / chain +${chainFlips.length}` : ''}${
-          combo.label ? ` / ${combo.label}` : ''
+          preFlipComboSilence.label ? ` / ${preFlipComboSilence.label}` : ''
+        }${combo.label ? ` / ${combo.label}` : ''
         }`
       : 'Reverse target blocked',
   }
@@ -678,14 +903,18 @@ function applyDirectDropAction(state: MatchState) {
   const canPlace = !cell.disc && !isPlacementBlocked(next, target, player)
   const chainFlips: Coord[] = []
   let damage: SpecialResult = { count: 0, label: '', effects: [] }
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(next, targetPlayer, coord)
 
   if (canPlace) {
     cell.disc = createDisc(player, 'DROP')
     damage = applyDamageCellTrigger(next, target, player)
-    chainFlips.push(...applyChainFlips(next.board, player, [target], next.turn))
-    next.specialPoints[player] -= specialCost.DROP
+    const zoneSilence = applySilenceZonesToCoord(next, target)
+    chainFlips.push(...applyChainFlips(next.board, player, [target], next.turn, onTrapTriggered))
+    spendSpecialCostAndSetCooldown(next, player, 'DROP')
     next.visualEffects = [
+      ...next.visualEffects,
       ...damage.effects,
+      ...zoneSilence.effects,
       { coord: target, type: 'place' as const },
       ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
     ]
@@ -749,7 +978,33 @@ function cloneState(state: MatchState): MatchState {
     damageCells: state.damageCells.map((cell) => ({
       coord: { ...cell.coord },
       damageFor: cell.damageFor,
+      silenceExpiresAtTurn: cell.silenceExpiresAtTurn,
     })),
+    silenceZones: state.silenceZones.map((zone) => ({
+      coords: zone.coords.map((coord) => ({ ...coord })),
+      silencedPlayer: zone.silencedPlayer,
+      expiresAtTurn: zone.expiresAtTurn,
+    })),
+    cooldowns: {
+      BLACK: { ...state.cooldowns.BLACK },
+      WHITE: { ...state.cooldowns.WHITE },
+    },
+    trapLockPending: {
+      BLACK: state.trapLockPending.BLACK,
+      WHITE: state.trapLockPending.WHITE,
+    },
+    trapLockActive: {
+      BLACK: state.trapLockActive.BLACK,
+      WHITE: state.trapLockActive.WHITE,
+    },
+    damageCostPending: {
+      BLACK: state.damageCostPending.BLACK,
+      WHITE: state.damageCostPending.WHITE,
+    },
+    damageCostActive: {
+      BLACK: state.damageCostActive.BLACK,
+      WHITE: state.damageCostActive.WHITE,
+    },
   }
 }
 
@@ -767,16 +1022,28 @@ function resolveSpecialEffect(state: MatchState, piece: PieceType, move: MoveRes
       return resolveCharge(state, move)
     case 'DAMAGE':
       return resolveDamage(state, move)
-    case 'CROSS':
-      return resolveCross(state, move)
-    case 'DIAGONAL':
-      return resolveDiagonal(state, move)
-    case 'DRAIN':
-      return resolveDrain(state, move)
-    case 'FORT':
-      return resolveFort(state, move)
-    case 'BLOOM':
-      return resolveBloom(state, move)
+    case 'SILENCE':
+      return resolveSilence(state, move)
+    case 'TRAP':
+      return resolveTrapAuto(state, move)
+    case 'GUARDIAN':
+      return {
+        count: 0,
+        label: 'Guardian aura armed',
+        effects: [{ coord: move, type: 'guard' }],
+      }
+    case 'MINEFIELD':
+      return {
+        count: 0,
+        label: 'Mine aura armed',
+        effects: [{ coord: move, type: 'damage' }],
+      }
+    case 'SNARE':
+      return {
+        count: 0,
+        label: 'Snare aura armed',
+        effects: [{ coord: move, type: 'trap' }],
+      }
     default:
       return { count: 0, label: 'standard flip', effects: [] }
   }
@@ -784,6 +1051,7 @@ function resolveSpecialEffect(state: MatchState, piece: PieceType, move: MoveRes
 
 function resolveReverse(state: MatchState, move: MoveResult): SpecialResult {
   const player = state.currentPlayer
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(state, targetPlayer, coord)
   const candidates = getReverseTargets(state)
     .filter((target) => !sameSquare(target, move))
     .sort((a, b) => positionWeights[b.y][b.x] - positionWeights[a.y][a.x])
@@ -794,8 +1062,8 @@ function resolveReverse(state: MatchState, move: MoveResult): SpecialResult {
     return { count: 0, label: 'Reverse had no target', effects: [] }
   }
 
-  const flipped = tryFlip(state.board, target, player, state.turn)
-  const chainFlips = flipped ? applyChainFlips(state.board, player, [target], state.turn) : []
+  const flipped = tryFlip(state.board, target, player, state.turn, onTrapTriggered)
+  const chainFlips = flipped ? applyChainFlips(state.board, player, [target], state.turn, onTrapTriggered) : []
 
   return {
     count: (flipped ? 1 : 0) + chainFlips.length,
@@ -832,8 +1100,12 @@ function getBarrierTargets(state: MatchState, pending: PendingBarrier) {
     .filter((coord) => !baseWarded.has(`${coord.x}-${coord.y}`))
 }
 
-function resolveComboEffects(state: MatchState, move: MoveResult): SpecialResult {
-  return resolveComboEffectsFromOrigins(state, getPlacementComboOrigins(state, move))
+function getTrapTargets(state: MatchState, pending: PendingTrap) {
+  const baseTrapped = new Set(pending.baseTrapped.map((coord) => `${coord.x}-${coord.y}`))
+  return state.board
+    .filter((cell) => cell.disc?.owner === state.currentPlayer)
+    .map((cell) => cell.coord)
+    .filter((coord) => !baseTrapped.has(`${coord.x}-${coord.y}`))
 }
 
 function getPlacementComboOrigins(state: MatchState, move: MoveResult) {
@@ -843,7 +1115,7 @@ function getPlacementComboOrigins(state: MatchState, move: MoveResult) {
       .filter((coord) => !sameSquare(coord, move))
       .filter((coord) => {
         const disc = getCell(state.board, coord).disc
-        return Boolean(disc?.owner === state.currentPlayer && comboPieces.has(disc.piece))
+        return Boolean(disc?.owner === state.currentPlayer && comboPieces.has(disc.piece) && !hasSilence(disc, state.turn))
       }),
   )
 }
@@ -874,10 +1146,43 @@ function getComboOriginsFromFlank(state: MatchState, origins: Coord[]) {
   return uniqueCoords(comboOrigins)
 }
 
-function resolveComboEffectsFromOrigins(state: MatchState, origins: Coord[]): SpecialResult {
+function resolvePreFlipSilenceCombos(state: MatchState, origins: Coord[]) {
+  const silenceOrigins = uniqueCoords(origins).filter((coord) => {
+    const disc = getCell(state.board, coord).disc
+    return Boolean(disc?.owner === state.currentPlayer && disc.piece === 'SILENCE' && !hasSilence(disc, state.turn))
+  })
+
+  if (silenceOrigins.length === 0) {
+    return { count: 0, label: '', effects: [], origins: [] as Coord[] }
+  }
+
+  const results = silenceOrigins.map((origin) => resolveSilence(state, origin))
+
+  return {
+    count: results.reduce((sum, result) => sum + result.count, 0),
+    label: `Combo ${results.map((result) => result.label).join(' + ')}`,
+    effects: [
+      ...results.flatMap((result) => result.effects),
+      ...silenceOrigins.map((coord) => ({ coord, type: 'combo' as const })),
+    ],
+    origins: silenceOrigins,
+  }
+}
+
+function resolveComboEffectsFromOrigins(
+  state: MatchState,
+  origins: Coord[],
+  excludedOrigins: Coord[] = [],
+): SpecialResult {
+  const excludedKeys = new Set(excludedOrigins.map((coord) => `${coord.x}-${coord.y}`))
   const activeOrigins = uniqueCoords(origins).filter((coord) => {
     const disc = getCell(state.board, coord).disc
-    return Boolean(disc?.owner === state.currentPlayer && comboPieces.has(disc.piece))
+    return Boolean(
+      !excludedKeys.has(`${coord.x}-${coord.y}`) &&
+        disc?.owner === state.currentPlayer &&
+        comboPieces.has(disc.piece) &&
+        !hasSilence(disc, state.turn),
+    )
   })
 
   const results = activeOrigins
@@ -923,29 +1228,15 @@ function resolveComboEffect(state: MatchState, piece: PieceType, origin: Coord):
   }
 
   if (piece === 'DAMAGE') {
-    return resolveDamageCombo(state)
+    return resolveDamageCombo(state, origin)
   }
 
-  if (piece === 'CROSS') {
-    const result = resolveCross(state, move)
-    return { ...result, label: `Cross +${result.count}` }
+  if (piece === 'SILENCE') {
+    return resolveSilence(state, move)
   }
 
-  if (piece === 'DIAGONAL') {
-    const result = resolveDiagonal(state, move)
-    return { ...result, label: `Diagonal +${result.count}` }
-  }
-
-  if (piece === 'DRAIN') {
-    return resolveDrain(state, move)
-  }
-
-  if (piece === 'FORT') {
-    return resolveFort(state, move)
-  }
-
-  if (piece === 'BLOOM') {
-    return resolveBloom(state, move)
+  if (piece === 'TRAP') {
+    return resolveTrapCombo(state)
   }
 
   return { count: 0, label: '', effects: [] }
@@ -992,16 +1283,59 @@ function resolveDropCombo(state: MatchState, origin: Coord): SpecialResult {
   const cell = getCell(state.board, target)
   cell.disc = createDisc(state.currentPlayer, 'DROP')
   const damage = applyDamageCellTrigger(state, target, state.currentPlayer)
-  const chainFlips = applyChainFlips(state.board, state.currentPlayer, [target], state.turn)
+  const zoneSilence = applySilenceZonesToCoord(state, target)
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(state, targetPlayer, coord)
+  const chainFlips = applyChainFlips(state.board, state.currentPlayer, [target], state.turn, onTrapTriggered)
 
   return {
     count: 1 + chainFlips.length,
     label: `Drop ${coordLabel(target)}${damage.label ? ` / ${damage.label}` : ''}`,
     effects: [
       ...damage.effects,
+      ...zoneSilence.effects,
       { coord: target, type: 'place' },
       ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
     ],
+  }
+}
+
+function resolveTrapCombo(state: MatchState): SpecialResult {
+  const target = chooseRandomCoord(
+    shuffleCoords(
+      state.board
+        .filter((cell) => cell.disc?.owner === state.currentPlayer)
+        .map((cell) => cell.coord),
+    ),
+  )
+
+  if (!target || !addTrap(state, target)) {
+    return { count: 0, label: 'Trap no target', effects: [] }
+  }
+
+  return {
+    count: 0,
+    label: `Trap ${coordLabel(target)}`,
+    effects: [{ coord: target, type: 'trap' }],
+  }
+}
+
+function resolveTrapAuto(state: MatchState, move: MoveResult): SpecialResult {
+  const baseTrapped = applyBaseTrap(state, move)
+  const candidates = shuffleCoords(
+    getTrapTargets(state, {
+      move,
+      baseTrapped,
+      selected: [],
+      captured: 0,
+    }),
+  ).slice(0, 2)
+  const selected = candidates.filter((coord) => addTrap(state, coord))
+  const trapped = uniqueCoords([...baseTrapped, ...selected])
+
+  return {
+    count: 0,
+    label: `Trap x${trapped.length}`,
+    effects: trapped.map((coord) => ({ coord, type: 'trap' })),
   }
 }
 
@@ -1026,7 +1360,7 @@ function resolveCharge(state: MatchState, move: MoveResult): SpecialResult {
 }
 
 function resolveDamage(state: MatchState, move: MoveResult): SpecialResult {
-  const targets = cardinalDirections()
+  const targets = directions
     .map((dir) => ({ x: move.x + dir.dx, y: move.y + dir.dy }))
     .filter((coord) => isInside(coord) && !getCell(state.board, coord).disc)
 
@@ -1039,186 +1373,243 @@ function resolveDamage(state: MatchState, move: MoveResult): SpecialResult {
   }
 }
 
-function resolveCross(state: MatchState, move: Coord): SpecialResult {
-  const player = state.currentPlayer
-  const targets = cardinalDirections()
-    .map((dir) => findFirstFlippableOnRay(state, move, dir))
-    .filter((target): target is Coord => Boolean(target))
+function resolveSilence(state: MatchState, move: Coord): SpecialResult {
+  const range = getSilenceRange(state, move)
+  const opponent = getOpponent(state.currentPlayer)
+  const expiresAtTurn = state.turn + 1
+  const targets = getSilenceTargets(state, move)
+  const rangeKeys = new Set(range.map((coord) => `${coord.x}-${coord.y}`))
 
-  const flipped = targets.filter((target) => tryFlip(state.board, target, player, state.turn))
-  const chainFlips = applyChainFlips(state.board, player, flipped, state.turn)
+  state.silenceZones = [
+    ...state.silenceZones.filter((zone) => zone.expiresAtTurn >= state.turn),
+    {
+      coords: range,
+      silencedPlayer: opponent,
+      expiresAtTurn,
+    },
+  ]
 
-  return {
-    count: flipped.length + chainFlips.length,
-    label:
-      flipped.length > 0
-        ? `Cross +${flipped.length}${chainFlips.length > 0 ? ` / chain +${chainFlips.length}` : ''}`
-        : 'Cross had no target',
-    effects: [
-      ...flipped.map((coord) => ({ coord, type: 'flip' as const })),
-      ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
-    ],
-  }
-}
+  for (const coord of targets) {
+    const disc = getCell(state.board, coord).disc
 
-function resolveDiagonal(state: MatchState, move: Coord): SpecialResult {
-  const player = state.currentPlayer
-  const targets = uniqueCoords(
-    diagonalDirections().flatMap((dir) => findFlippablesOnRay(state, move, dir)),
-  )
-
-  const flipped = targets.filter((target) => tryFlip(state.board, target, player, state.turn))
-  const chainFlips = applyChainFlips(state.board, player, flipped, state.turn)
-
-  return {
-    count: flipped.length + chainFlips.length,
-    label:
-      flipped.length > 0
-        ? `Diagonal +${flipped.length}${chainFlips.length > 0 ? ` / chain +${chainFlips.length}` : ''}`
-        : 'Diagonal had no target',
-    effects: [
-      ...flipped.map((coord) => ({ coord, type: 'flip' as const })),
-      ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
-    ],
-  }
-}
-
-function findFirstFlippableOnRay(state: MatchState, origin: Coord, dir: Direction) {
-  let cursor = { x: origin.x + dir.dx, y: origin.y + dir.dy }
-
-  while (isInside(cursor)) {
-    const disc = getCell(state.board, cursor).disc
-
-    if (disc && canSpecialFlip(state.board, cursor, state.currentPlayer, state.turn)) {
-      return cursor
+    if (!disc) {
+      continue
     }
 
-    cursor = { x: cursor.x + dir.dx, y: cursor.y + dir.dy }
+    disc.statuses = disc.statuses.filter((status) => status.type !== 'SILENCE')
+    disc.statuses.push({ type: 'SILENCE', expiresAtTurn })
   }
 
-  return null
+  const silencedDamageCells = state.damageCells
+    .filter(
+      (cell) =>
+        cell.damageFor === state.currentPlayer &&
+        rangeKeys.has(`${cell.coord.x}-${cell.coord.y}`),
+    )
+    .map((cell) => {
+      cell.silenceExpiresAtTurn = expiresAtTurn
+      return cell.coord
+    })
+
+  return {
+    count: 0,
+    label: `Silence x${targets.length + silencedDamageCells.length}`,
+    effects: range.map((coord) => ({ coord, type: 'silence' as const })),
+  }
 }
 
-function findFlippablesOnRay(state: MatchState, origin: Coord, dir: Direction) {
+function getSilenceRange(state: MatchState, origin: Coord) {
+  return state.board
+    .map((cell) => cell.coord)
+    .filter((coord) => {
+      const dx = Math.abs(coord.x - origin.x)
+      const dy = Math.abs(coord.y - origin.y)
+      return !sameSquare(coord, origin) && dx <= 2 && dy <= 2 && !(dx === 2 && dy === 2)
+    })
+}
+
+function getSilenceTargets(state: MatchState, origin: Coord) {
+  const opponent = getOpponent(state.currentPlayer)
+  return getSilenceRange(state, origin)
+    .filter((coord) => {
+      const disc = getCell(state.board, coord).disc
+      return Boolean(
+        disc?.owner === opponent &&
+          (disc.piece !== 'NORMAL' ||
+            disc.statuses.some((status) => status.type === 'GUARD' || status.type === 'WARD' || status.type === 'TRAP')),
+      )
+    })
+}
+
+function applySilenceZonesToCoord(state: MatchState, coord: Coord): SpecialResult {
+  const disc = getCell(state.board, coord).disc
+
+  if (!disc || disc.owner !== state.currentPlayer || disc.piece === 'NORMAL') {
+    return { count: 0, label: '', effects: [] }
+  }
+
+  const activeZone = state.silenceZones.find(
+    (zone) =>
+      zone.silencedPlayer === disc.owner &&
+      zone.expiresAtTurn >= state.turn &&
+      zone.coords.some((zoneCoord) => sameSquare(zoneCoord, coord)),
+  )
+
+  if (!activeZone) {
+    return { count: 0, label: '', effects: [] }
+  }
+
+  disc.statuses = disc.statuses.filter((status) => status.type !== 'SILENCE')
+  disc.statuses.push({ type: 'SILENCE', expiresAtTurn: activeZone.expiresAtTurn })
+
+  return {
+    count: 0,
+    label: 'Silence field',
+    effects: [{ coord, type: 'silence' }],
+  }
+}
+
+function counterSilenceZonesAt(state: MatchState, coord: Coord, player: Player): SpecialResult {
+  const counteredZones = state.silenceZones.filter(
+    (zone) =>
+      zone.silencedPlayer === player &&
+      zone.expiresAtTurn >= state.turn &&
+      zone.coords.some((zoneCoord) => sameSquare(zoneCoord, coord)),
+  )
+
+  if (counteredZones.length === 0) {
+    return { count: 0, label: '', effects: [] }
+  }
+
+  const counteredKeys = new Set(
+    counteredZones.flatMap((zone) => zone.coords.map((zoneCoord) => `${zoneCoord.x}-${zoneCoord.y}`)),
+  )
+
+  state.silenceZones = state.silenceZones.filter((zone) => !counteredZones.includes(zone))
+
+  for (const cell of state.board) {
+    if (!cell.disc || cell.disc.owner !== player || !counteredKeys.has(`${cell.coord.x}-${cell.coord.y}`)) {
+      continue
+    }
+
+    cell.disc.statuses = cell.disc.statuses.filter((status) => status.type !== 'SILENCE')
+  }
+
+  for (const damageCell of state.damageCells) {
+    if (damageCell.damageFor === getOpponent(player) && counteredKeys.has(`${damageCell.coord.x}-${damageCell.coord.y}`)) {
+      damageCell.silenceExpiresAtTurn = undefined
+    }
+  }
+
+  return {
+    count: 0,
+    label: `Counter Silence x${counteredZones.length}`,
+    effects: uniqueCoords(counteredZones.flatMap((zone) => zone.coords)).map((zoneCoord) => ({
+      coord: zoneCoord,
+      type: 'silence' as const,
+    })),
+  }
+}
+
+function isSilenceZoneForPlayer(state: MatchState, coord: Coord, player: Player) {
+  return state.silenceZones.some(
+    (zone) =>
+      zone.silencedPlayer === player &&
+      zone.expiresAtTurn >= state.turn &&
+      zone.coords.some((zoneCoord) => sameSquare(zoneCoord, coord)),
+  )
+}
+
+function getSilenceForDamageCell(state: MatchState, coord: Coord, damageFor: Player) {
+  return state.silenceZones.find(
+    (zone) =>
+      zone.silencedPlayer === getOpponent(damageFor) &&
+      zone.expiresAtTurn >= state.turn &&
+      zone.coords.some((zoneCoord) => sameSquare(zoneCoord, coord)),
+  )
+}
+
+function resolveDamageCombo(state: MatchState, origin: Coord): SpecialResult {
+  return resolveDamageComboForPlayer(state, origin, state.currentPlayer)
+}
+
+function resolveDamageComboForPlayer(state: MatchState, origin: Coord, player: Player, sourceLimit = 2): SpecialResult {
+  const sources = shuffleCoords(
+    getOwnDamageCells(state, player)
+      .map((cell) => cell.coord)
+      .filter((coord) => getDamageSpreadTargetsFrom(state, coord).length > 0),
+  ).slice(0, sourceLimit)
+
   const targets: Coord[] = []
-  let cursor = { x: origin.x + dir.dx, y: origin.y + dir.dy }
 
-  while (isInside(cursor)) {
-    if (canSpecialFlip(state.board, cursor, state.currentPlayer, state.turn)) {
-      targets.push(cursor)
+  for (const source of sources) {
+    const target = chooseRandomCoord(getDamageSpreadTargetsFrom(state, source, targets))
+
+    if (target) {
+      targets.push(target)
     }
-
-    cursor = { x: cursor.x + dir.dx, y: cursor.y + dir.dy }
   }
-
-  return targets
-}
-
-function resolveDrain(state: MatchState, move: Coord): SpecialResult {
-  const player = state.currentPlayer
-  const opponent = getOpponent(player)
-  const drained = Math.min(2, state.specialPoints[opponent])
-
-  if (drained) {
-    state.specialPoints[opponent] -= drained
-  }
-
-  for (let index = 0; index < Math.max(1, drained); index += 1) {
-    recoverSpecialPoint(state, player)
-  }
-
-  return {
-    count: 0,
-    label: drained ? `Drain +${drained}/-${drained}SP` : 'Drain +1SP',
-    effects: [{ coord: move, type: 'charge' }],
-  }
-}
-
-function resolveFort(state: MatchState, move: Coord): SpecialResult {
-  const targets = [
-    move,
-    ...directions.map((dir) => ({ x: move.x + dir.dx, y: move.y + dir.dy })),
-  ].filter((coord) => isInside(coord))
-
-  const warded = uniqueCoords(targets).filter((coord) => addWard(state, coord))
-  const damaged = addDamageCells(
-    state,
-    cardinalDirections()
-      .map((dir) => ({ x: move.x + dir.dx, y: move.y + dir.dy }))
-      .filter((coord) => isInside(coord) && !getCell(state.board, coord).disc),
-    getOpponent(state.currentPlayer),
-  )
-
-  return {
-    count: 0,
-    label: `Fort x${warded.length} / Damage x${damaged.length}`,
-    effects: [
-      ...warded.map((coord) => ({ coord, type: 'guard' as const })),
-      ...damaged.map((coord) => ({ coord, type: 'damage' as const })),
-    ],
-  }
-}
-
-function resolveBloom(state: MatchState, move: Coord): SpecialResult {
-  const targets = shuffleCoords(
-    directions
-      .map((dir) => ({ x: move.x + dir.dx, y: move.y + dir.dy }))
-      .filter((coord) => isInside(coord) && !getCell(state.board, coord).disc),
-  ).slice(0, 3)
 
   if (targets.length === 0) {
-    return { count: 0, label: 'Bloom had no target', effects: [] }
+    const fallback = getNearestDamageFallbackTarget(state, origin)
+
+    if (fallback) {
+      targets.push(fallback)
+    }
   }
 
-  const damageEffects: VisualEffect[] = []
-
-  for (const target of targets) {
-    const cell = getCell(state.board, target)
-    cell.disc = createDisc(state.currentPlayer, 'NORMAL')
-    damageEffects.push(...applyDamageCellTrigger(state, target, state.currentPlayer).effects)
+  if (targets.length === 0) {
+    return { count: 0, label: 'Damage spread no target', effects: [] }
   }
 
-  const chainFlips = applyChainFlips(state.board, state.currentPlayer, targets, state.turn)
+  const damaged = addDamageCells(state, targets, getOpponent(player))
 
   return {
-    count: targets.length + chainFlips.length,
-    label: `Bloom x${targets.length}${chainFlips.length > 0 ? ` / chain +${chainFlips.length}` : ''}`,
-    effects: [
-      ...damageEffects,
-      ...targets.map((coord) => ({ coord, type: 'place' as const })),
-      ...chainFlips.map((coord) => ({ coord, type: 'flip' as const })),
-    ],
-  }
-}
-
-function resolveDamageCombo(state: MatchState): SpecialResult {
-  const target = chooseRandomCoord(getDamageTargets(state))
-
-  if (!target) {
-    return { count: 0, label: 'Damage no target', effects: [] }
-  }
-
-  const damaged = addDamageCells(state, [target], getOpponent(state.currentPlayer))
-
-  return {
-    count: 0,
-    label: damaged.length > 0 ? `Damage ${coordLabel(target)}` : 'Damage no target',
+    count: damaged.length,
+    label: damaged.length > 0 ? `Damage spread x${damaged.length}` : 'Damage spread no target',
     effects: damaged.map((coord) => ({ coord, type: 'damage' as const })),
   }
 }
 
+function getNearestDamageFallbackTarget(state: MatchState, origin: Coord) {
+  const damageCellKeys = new Set(state.damageCells.map((cell) => `${cell.coord.x}-${cell.coord.y}`))
+
+  return state.board
+    .filter((cell) => !cell.disc && !damageCellKeys.has(`${cell.coord.x}-${cell.coord.y}`))
+    .map((cell) => cell.coord)
+    .toSorted(
+      (a, b) =>
+        distanceSquared(a, origin) - distanceSquared(b, origin) ||
+        positionWeights[b.y][b.x] - positionWeights[a.y][a.x],
+    )[0]
+}
+
+function distanceSquared(a: Coord, b: Coord) {
+  return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+}
+
+function getOwnDamageCells(state: MatchState, player = state.currentPlayer) {
+  return state.damageCells.filter((cell) => cell.damageFor === getOpponent(player))
+}
+
+function getDamageSpreadTargetsFrom(state: MatchState, source: Coord, reservedTargets: Coord[] = []) {
+  const unavailableKeys = new Set([
+    ...state.damageCells.map((cell) => `${cell.coord.x}-${cell.coord.y}`),
+    ...reservedTargets.map((coord) => `${coord.x}-${coord.y}`),
+  ])
+
+  return cardinalDirections()
+    .map((dir) => ({ x: source.x + dir.dx, y: source.y + dir.dy }))
+    .filter(
+      (coord) =>
+        isInside(coord) &&
+        !getCell(state.board, coord).disc &&
+        !unavailableKeys.has(`${coord.x}-${coord.y}`),
+    )
+}
+
 function cardinalDirections() {
   return directions.filter((dir) => Math.abs(dir.dx) + Math.abs(dir.dy) === 1)
-}
-
-function diagonalDirections() {
-  return directions.filter((dir) => Math.abs(dir.dx) === 1 && Math.abs(dir.dy) === 1)
-}
-
-function getDamageTargets(state: MatchState) {
-  return state.board
-    .filter((cell) => !cell.disc)
-    .map((cell) => cell.coord)
 }
 
 function addDamageCells(state: MatchState, targets: Coord[], damageFor: Player) {
@@ -1227,7 +1618,11 @@ function addDamageCells(state: MatchState, targets: Coord[], damageFor: Player) 
 
   state.damageCells = [
     ...state.damageCells.filter((cell) => !targetKeys.has(`${cell.coord.x}-${cell.coord.y}`)),
-    ...validTargets.map((coord) => ({ coord, damageFor })),
+    ...validTargets.map((coord) => ({
+      coord,
+      damageFor,
+      silenceExpiresAtTurn: getSilenceForDamageCell(state, coord, damageFor)?.expiresAtTurn,
+    })),
   ]
 
   return validTargets
@@ -1245,13 +1640,33 @@ function applyDamageCellTrigger(state: MatchState, coord: Coord, player: Player)
     return { count: 0, label: '', effects: [] }
   }
 
-  state.specialPoints[player] = Math.max(0, state.specialPoints[player] - 2)
+  if (isDamageCellSilenced(target, state.turn)) {
+    return {
+      count: 0,
+      label: 'Damage silenced',
+      effects: [{ coord, type: 'silence' }],
+    }
+  }
+
+  applyDamageCostPenalty(state, player)
 
   return {
     count: 0,
-    label: 'Damage -2SP',
+    label: 'Damage next cost +1',
     effects: [{ coord, type: 'damage' }],
   }
+}
+
+function clearDamageCellAt(state: MatchState, coord: Coord): SpecialResult {
+  state.damageCells = state.damageCells.filter(
+    (cell) => cell.coord.x !== coord.x || cell.coord.y !== coord.y,
+  )
+
+  return { count: 0, label: '', effects: [] }
+}
+
+function isDamageCellSilenced(cell: DamageCell, turn: number) {
+  return cell.silenceExpiresAtTurn !== undefined && cell.silenceExpiresAtTurn >= turn
 }
 
 function resolveSeal(state: MatchState, move: MoveResult): SpecialResult {
@@ -1282,12 +1697,13 @@ function resolveSeal(state: MatchState, move: MoveResult): SpecialResult {
 
 function resolveBlast(state: MatchState, move: MoveResult): SpecialResult {
   const player = state.currentPlayer
+  const onTrapTriggered = (targetPlayer: Player, coord: Coord) => applyTrapPenalty(state, targetPlayer, coord)
   const targets = directions
     .map((dir) => ({ x: move.x + dir.dx, y: move.y + dir.dy }))
     .filter((target) => canSpecialFlip(state.board, target, player, state.turn))
 
-  const flipped = targets.filter((target) => tryFlip(state.board, target, player, state.turn))
-  const chainFlips = applyChainFlips(state.board, player, flipped, state.turn)
+  const flipped = targets.filter((target) => tryFlip(state.board, target, player, state.turn, onTrapTriggered))
+  const chainFlips = applyChainFlips(state.board, player, flipped, state.turn, onTrapTriggered)
 
   return {
     count: flipped.length + chainFlips.length,
@@ -1325,15 +1741,45 @@ function applyBaseBarrier(state: MatchState, move: MoveResult) {
   return uniqueCoords(warded)
 }
 
+function applyBaseTrap(state: MatchState, move: MoveResult) {
+  const trapped: Coord[] = []
+
+  if (addTrap(state, move)) {
+    trapped.push(move)
+  }
+
+  return trapped
+}
+
 function addWard(state: MatchState, coord: Coord) {
+  return addWardForPlayer(state, coord, state.currentPlayer)
+}
+
+function addWardForPlayer(state: MatchState, coord: Coord, player: Player) {
   const disc = getCell(state.board, coord).disc
 
-  if (disc?.owner !== state.currentPlayer) {
+  if (disc?.owner !== player) {
     return false
   }
 
   disc.statuses = disc.statuses.filter((status) => status.type !== 'GUARD')
   disc.statuses.push({ type: 'GUARD', charges: 1 })
+  return true
+}
+
+function addTrap(state: MatchState, coord: Coord) {
+  return addTrapForPlayer(state, coord, state.currentPlayer)
+}
+
+function addTrapForPlayer(state: MatchState, coord: Coord, player: Player) {
+  const disc = getCell(state.board, coord).disc
+
+  if (disc?.owner !== player) {
+    return false
+  }
+
+  disc.statuses = disc.statuses.filter((status) => status.type !== 'TRAP')
+  disc.statuses.push({ type: 'TRAP' })
   return true
 }
 
@@ -1351,6 +1797,8 @@ function canSpecialFlip(board: Cell[], target: Coord, attacker: Player, turn: nu
 }
 
 function advanceTurn(state: MatchState) {
+  const previousPlayer = state.currentPlayer
+  resolveEndTurnAuras(state, previousPlayer)
   let nextPlayer = getOpponent(state.currentPlayer)
   let passesInRow = 0 as 0 | 1 | 2
   const upcomingTurn = state.turn + 1
@@ -1366,15 +1814,105 @@ function advanceTurn(state: MatchState) {
     }
   }
 
+  state.trapLockActive[previousPlayer] = false
+  state.damageCostActive[previousPlayer] = false
   state.currentPlayer = nextPlayer
   state.turn += 1
   state.passesInRow = passesInRow
 
   if (!state.winner) {
-    recoverSpecialPoint(state, state.currentPlayer)
+    const trapLockTriggers = state.trapLockPending[state.currentPlayer] > 0
+    const damageCostTriggers = state.damageCostPending[state.currentPlayer] > 0
+    state.trapLockActive[state.currentPlayer] = trapLockTriggers
+    state.damageCostActive[state.currentPlayer] = damageCostTriggers
+    if (trapLockTriggers) {
+      state.trapLockPending[state.currentPlayer] = Math.max(0, state.trapLockPending[state.currentPlayer] - 1)
+    }
+    if (damageCostTriggers) {
+      state.damageCostPending[state.currentPlayer] = Math.max(0, state.damageCostPending[state.currentPlayer] - 1)
+    }
+    tickCooldowns(state, state.currentPlayer)
+    if (!trapLockTriggers) {
+      recoverSpecialPoint(state, state.currentPlayer)
+    }
   }
 
   expireTurnState(state)
+}
+
+function resolveEndTurnAuras(state: MatchState, player: Player) {
+  const auraPieces = state.board.filter(
+    (cell) =>
+      cell.disc?.owner === player &&
+      (cell.disc.piece === 'GUARDIAN' || cell.disc.piece === 'MINEFIELD' || cell.disc.piece === 'SNARE') &&
+      !hasSilence(cell.disc, state.turn),
+  )
+
+  if (auraPieces.length === 0) {
+    return
+  }
+
+  const events: MatchEvent[] = []
+  const effects: VisualEffect[] = []
+
+  for (const cell of auraPieces) {
+    if (cell.disc?.piece === 'GUARDIAN') {
+      const targets = shuffleCoords(
+        state.board
+          .filter((targetCell) => targetCell.disc?.owner === player)
+          .map((targetCell) => targetCell.coord),
+      ).slice(0, 2)
+      const warded = targets.filter((target) => addWardForPlayer(state, target, player))
+
+      if (warded.length > 0) {
+        effects.push(...warded.map((coord) => ({ coord, type: 'guard' as const })))
+        events.push(createAuraEvent(state, player, 'GUARDIAN', cell.coord, `Guardian x${warded.length}`))
+      }
+    }
+
+    if (cell.disc?.piece === 'MINEFIELD') {
+      const damage = resolveDamageComboForPlayer(state, cell.coord, player, 1)
+
+      if (damage.count > 0) {
+        effects.push(...damage.effects)
+        events.push(createAuraEvent(state, player, 'MINEFIELD', cell.coord, `Mine ${damage.label}`))
+      }
+    }
+
+    if (cell.disc?.piece === 'SNARE') {
+      const targets = shuffleCoords(
+        state.board
+          .filter((targetCell) => targetCell.disc?.owner === player && targetCell.disc.piece === 'NORMAL')
+          .map((targetCell) => targetCell.coord),
+      ).slice(0, 1)
+      const trapped = targets.filter((target) => addTrapForPlayer(state, target, player))
+
+      if (trapped.length > 0) {
+        effects.push(...trapped.map((coord) => ({ coord, type: 'trap' as const })))
+        events.push(createAuraEvent(state, player, 'SNARE', cell.coord, `Snare x${trapped.length}`))
+      }
+    }
+  }
+
+  state.visualEffects = [...state.visualEffects, ...effects]
+  state.events = [...events, ...state.events].slice(0, 8)
+}
+
+function createAuraEvent(
+  state: MatchState,
+  player: Player,
+  piece: PieceType,
+  at: Coord,
+  special: string,
+): MatchEvent {
+  return {
+    turn: state.turn,
+    player,
+    piece,
+    at: { x: at.x, y: at.y },
+    captured: 0,
+    special,
+  }
 }
 
 function recoverSpecialPoint(state: MatchState, player: Player) {
@@ -1383,6 +1921,11 @@ function recoverSpecialPoint(state: MatchState, player: Player) {
 
 function expireTurnState(state: MatchState) {
   const chargeEffects: VisualEffect[] = []
+  const expiredSilenceEffects = uniqueCoords(
+    state.silenceZones
+      .filter((zone) => zone.expiresAtTurn < state.turn)
+      .flatMap((zone) => zone.coords),
+  ).map((coord) => ({ coord, type: 'silence-end' as const }))
 
   for (const cell of state.board) {
     if (!cell.disc) {
@@ -1392,6 +1935,7 @@ function expireTurnState(state: MatchState) {
     const charges = cell.disc.statuses.filter(
       (status) =>
         status.type === 'CHARGE' &&
+        !hasSilence(cell.disc!, state.turn) &&
         cell.disc?.owner === state.currentPlayer &&
         status.resolveAtTurn !== undefined &&
         status.resolveAtTurn <= state.turn,
@@ -1406,15 +1950,18 @@ function expireTurnState(state: MatchState) {
     }
 
     cell.disc.statuses = cell.disc.statuses.filter(
-      (status) => status.type !== 'WARD' || (status.expiresAtTurn ?? 0) >= state.turn,
+      (status) =>
+        (status.type !== 'WARD' && status.type !== 'SILENCE') ||
+        (status.expiresAtTurn ?? 0) >= state.turn,
     )
   }
 
   state.placementBlocks = state.placementBlocks.filter(
     (block) => block.expiresAtTurn >= state.turn,
   )
+  state.silenceZones = state.silenceZones.filter((zone) => zone.expiresAtTurn >= state.turn)
 
-  state.visualEffects = [...state.visualEffects, ...chargeEffects]
+  state.visualEffects = [...state.visualEffects, ...chargeEffects, ...expiredSilenceEffects]
 }
 
 function getWinner(board: Cell[]) {
@@ -1493,6 +2040,7 @@ function App() {
   const [decks, setDecks] = useState<Record<Player, SpecialPiece[]>>(defaultDecks)
   const [selectedPiece, setSelectedPiece] = useState<PieceType>('NORMAL')
   const [pendingBarrier, setPendingBarrier] = useState<PendingBarrier | null>(null)
+  const [pendingTrap, setPendingTrap] = useState<PendingTrap | null>(null)
   const [hoveredMoveKey, setHoveredMoveKey] = useState<string | null>(null)
 
   const legalMoves = useMemo(
@@ -1537,6 +2085,36 @@ function App() {
     () => new Map(state.damageCells.map((cell) => [`${cell.coord.x}-${cell.coord.y}`, cell])),
     [state.damageCells],
   )
+  const silenceZoneKeys = useMemo(
+    () =>
+      new Set(
+        state.silenceZones
+          .filter((zone) => zone.expiresAtTurn >= state.turn)
+          .flatMap((zone) => zone.coords.map((coord) => `${coord.x}-${coord.y}`)),
+      ),
+    [state.silenceZones, state.turn],
+  )
+  const silenceZoneEdgeMap = useMemo(() => {
+    const edgeMap = new Map<string, string>()
+
+    for (const key of silenceZoneKeys) {
+      const [xText, yText] = key.split('-')
+      const x = Number(xText)
+      const y = Number(yText)
+      const edges = [
+        !silenceZoneKeys.has(`${x}-${y - 1}`) ? 'silence-edge-top' : '',
+        !silenceZoneKeys.has(`${x + 1}-${y}`) ? 'silence-edge-right' : '',
+        !silenceZoneKeys.has(`${x}-${y + 1}`) ? 'silence-edge-bottom' : '',
+        !silenceZoneKeys.has(`${x - 1}-${y}`) ? 'silence-edge-left' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+
+      edgeMap.set(key, edges)
+    }
+
+    return edgeMap
+  }, [silenceZoneKeys])
   const barrierTargetMap = useMemo(
     () =>
       new Map(
@@ -1545,6 +2123,15 @@ function App() {
           : [],
       ),
     [pendingBarrier, state],
+  )
+  const trapTargetMap = useMemo(
+    () =>
+      new Map(
+        pendingTrap
+          ? getTrapTargets(state, pendingTrap).map((target) => [`${target.x}-${target.y}`, target])
+          : [],
+      ),
+    [pendingTrap, state],
   )
   const score = useMemo(() => countPieces(state.board), [state.board])
   const hoveredMove = hoveredMoveKey ? moveMap.get(hoveredMoveKey) : undefined
@@ -1558,6 +2145,8 @@ function App() {
   )
   const currentDeck = decks[state.currentPlayer]
   const cpuDeck = decks.WHITE
+  const isTrapLocked = state.trapLockActive[state.currentPlayer]
+  const isDamageCostRaised = state.damageCostActive[state.currentPlayer]
   const usableSelectedPiece =
     selectedPiece === 'NORMAL' || currentDeck.includes(selectedPiece as SpecialPiece)
       ? canUsePiece(state, state.currentPlayer, selectedPiece)
@@ -1565,7 +2154,8 @@ function App() {
         : 'NORMAL'
       : 'NORMAL'
   const isGameOver = Boolean(state.winner)
-  const isCpuTurn = mode === 'cpu' && state.currentPlayer === cpuPlayer && !isGameOver && !pendingBarrier
+  const isCpuTurn =
+    mode === 'cpu' && state.currentPlayer === cpuPlayer && !isGameOver && !pendingBarrier && !pendingTrap
   const activeInfo = pieceInfo[usableSelectedPiece]
   const message =
     usableSelectedPiece === 'LANCE' && !isCpuTurn && !isGameOver
@@ -1578,6 +2168,8 @@ function App() {
         : 'ドロップで置ける空きマスがありません。'
       : pendingBarrier
       ? `追加でアンカーを付与する自分の石を選んでください (${pendingBarrier.selected.length}/2)。完了ボタンでターン終了。`
+      : pendingTrap
+      ? `追加で罠を付与する自分の石を選んでください (${pendingTrap.selected.length}/2)。完了ボタンでターン終了。`
       : getStatusMessage(state, legalMoves.length)
 
   useEffect(() => {
@@ -1617,14 +2209,31 @@ function App() {
 
   const playMove = useCallback(
     (move: MoveResult) => {
-      if (isGameOver || isCpuTurn || pendingBarrier || usableSelectedPiece === 'LANCE' || usableSelectedPiece === 'DROP') {
+      if (
+        isGameOver ||
+        isCpuTurn ||
+        pendingBarrier ||
+        pendingTrap ||
+        usableSelectedPiece === 'LANCE' ||
+        usableSelectedPiece === 'DROP'
+      ) {
         return
       }
 
-      if (usableSelectedPiece === 'BARRIER') {
+      const entersSilenceZone =
+        usableSelectedPiece !== 'NORMAL' && isSilenceZoneForPlayer(state, move, state.currentPlayer)
+
+      if (usableSelectedPiece === 'BARRIER' && !entersSilenceZone) {
         const started = applyBarrierPlacementStart(state, move)
         setState(started.next)
         setPendingBarrier(started.pending)
+        return
+      }
+
+      if (usableSelectedPiece === 'TRAP' && !entersSilenceZone) {
+        const started = applyTrapPlacementStart(state, move)
+        setState(started.next)
+        setPendingTrap(started.pending)
         return
       }
 
@@ -1632,7 +2241,7 @@ function App() {
       setSelectedPiece('NORMAL')
       setHoveredMoveKey(null)
     },
-    [isCpuTurn, isGameOver, pendingBarrier, state, usableSelectedPiece],
+    [isCpuTurn, isGameOver, pendingBarrier, pendingTrap, state, usableSelectedPiece],
   )
 
   const handleDropUse = useCallback(() => {
@@ -1700,10 +2309,53 @@ function App() {
     setHoveredMoveKey(null)
   }, [pendingBarrier, state])
 
+  const handleTrapTarget = useCallback(
+    (target: Coord) => {
+      if (!pendingTrap) {
+        return
+      }
+
+      const selectedKey = `${target.x}-${target.y}`
+      const alreadySelected = pendingTrap.selected.some(
+        (coord) => `${coord.x}-${coord.y}` === selectedKey,
+      )
+
+      if (alreadySelected) {
+        setPendingTrap({
+          ...pendingTrap,
+          selected: pendingTrap.selected.filter((coord) => `${coord.x}-${coord.y}` !== selectedKey),
+        })
+        return
+      }
+
+      if (pendingTrap.selected.length >= 2) {
+        return
+      }
+
+      setPendingTrap({
+        ...pendingTrap,
+        selected: [...pendingTrap.selected, target],
+      })
+    },
+    [pendingTrap],
+  )
+
+  const finishTrap = useCallback(() => {
+    if (!pendingTrap) {
+      return
+    }
+
+    setState(finishTrapSelection(state, pendingTrap))
+    setPendingTrap(null)
+    setSelectedPiece('NORMAL')
+    setHoveredMoveKey(null)
+  }, [pendingTrap, state])
+
   function resetGame(nextMode = mode) {
     setState(createInitialState())
     setSelectedPiece('NORMAL')
     setPendingBarrier(null)
+    setPendingTrap(null)
     setHoveredMoveKey(null)
     setMode(nextMode)
   }
@@ -1846,13 +2498,17 @@ function App() {
                   const move = moveMap.get(moveKey)
                   const reverseTarget = reverseTargets.get(moveKey)
                   const barrierTarget = barrierTargetMap.get(moveKey)
+                  const trapTarget = trapTargetMap.get(moveKey)
                   const placementBlock = placementBlockMap.get(moveKey)
                   const damageCell = damageCellMap.get(moveKey)
+                  const isSilenceZone = silenceZoneKeys.has(moveKey)
+                  const silenceZoneEdges = silenceZoneEdgeMap.get(moveKey) ?? ''
                   const isLegal = Boolean(
                     move &&
                       !isGameOver &&
                       !isCpuTurn &&
                       !pendingBarrier &&
+                      !pendingTrap &&
                       usableSelectedPiece !== 'LANCE' &&
                       usableSelectedPiece !== 'DROP',
                   )
@@ -1865,6 +2521,13 @@ function App() {
                       (coord) => coord.x === cell.coord.x && coord.y === cell.coord.y,
                     ),
                   )
+                  const isTrapTarget = Boolean(pendingTrap && trapTarget)
+                  const isTrapSelected = Boolean(
+                    pendingTrap?.selected.some(
+                      (coord) => coord.x === cell.coord.x && coord.y === cell.coord.y,
+                    ),
+                  )
+                  const isDamageSilenced = Boolean(damageCell && isDamageCellSilenced(damageCell, state.turn))
                   const selected = cell.disc?.piece !== 'NORMAL'
                   const effect = visualEffectMap.get(moveKey)
                   const hasComboPreview = isLegal && comboPreviewMap.has(moveKey)
@@ -1873,7 +2536,7 @@ function App() {
                   return (
                     <button
                       type="button"
-                      className={`cell ${isLegal ? 'is-legal' : ''} ${isComboOrigin ? 'is-combo-origin' : ''} ${isReverseTarget ? 'is-reverse-target' : ''} ${isBarrierTarget ? 'is-barrier-target' : ''} ${isBarrierSelected ? 'is-barrier-selected' : ''} ${placementBlock ? 'is-placement-blocked' : ''} ${damageCell ? `is-damage-cell damage-for-${damageCell.damageFor.toLowerCase()}` : ''} ${selected ? 'has-special' : ''} ${effect ? `effect-${effect}` : ''}`}
+                      className={`cell ${isLegal ? 'is-legal' : ''} ${isComboOrigin ? 'is-combo-origin' : ''} ${isReverseTarget ? 'is-reverse-target' : ''} ${isBarrierTarget ? 'is-barrier-target' : ''} ${isBarrierSelected ? 'is-barrier-selected' : ''} ${isTrapTarget ? 'is-trap-target' : ''} ${isTrapSelected ? 'is-trap-selected' : ''} ${isSilenceZone ? 'is-silence-zone' : ''} ${silenceZoneEdges} ${placementBlock ? 'is-placement-blocked' : ''} ${damageCell ? `is-damage-cell damage-for-${damageCell.damageFor.toLowerCase()}` : ''} ${isDamageSilenced ? 'is-damage-silenced' : ''} ${selected ? 'has-special' : ''} ${effect ? `effect-${effect}` : ''}`}
                       key={moveKey}
                       onMouseEnter={() => {
                         if (hasComboPreview) {
@@ -1896,6 +2559,11 @@ function App() {
                         }
                       }}
                       onClick={() => {
+                        if (trapTarget) {
+                          handleTrapTarget(trapTarget)
+                          return
+                        }
+
                         if (barrierTarget) {
                           handleBarrierTarget(barrierTarget)
                           return
@@ -1910,9 +2578,11 @@ function App() {
                           playMove(move)
                         }
                       }}
-                      disabled={!isLegal && !isReverseTarget && !isBarrierTarget}
+                      disabled={!isLegal && !isReverseTarget && !isBarrierTarget && !isTrapTarget}
                       aria-label={
-                        isBarrierTarget
+                        isTrapTarget
+                          ? `${coordLabel(cell.coord)}に罠を付与する`
+                          : isBarrierTarget
                           ? `${coordLabel(cell.coord)}に追加アンカーを付与する`
                           : isReverseTarget
                           ? `${coordLabel(cell.coord)}の相手石をリバースで返す`
@@ -1923,6 +2593,7 @@ function App() {
                           : coordLabel(cell.coord)
                       }
                     >
+                      {isSilenceZone ? <span className="silence-zone-ring" aria-hidden="true" /> : null}
                       {cell.disc ? (
                         <DiscView disc={cell.disc} />
                       ) : isLegal ? (
@@ -1935,13 +2606,22 @@ function App() {
             </div>
           </div>
 
-          <div className="piece-dock" aria-label="Piece selection">
+          <div
+            className={`piece-dock ${isTrapLocked ? 'is-trap-locked' : ''} ${
+              isDamageCostRaised ? 'is-damage-cost-raised' : ''
+            }`}
+            aria-label="Piece selection"
+          >
             {(['NORMAL', ...currentDeck] as PieceType[]).map((piece) => {
+              const cooldown =
+                piece === 'NORMAL' ? 0 : getCooldownRemaining(state, state.currentPlayer, piece)
               const disabled = !canUsePiece(state, state.currentPlayer, piece) || isCpuTurn || isGameOver
+              const showsTrapLock = isTrapLocked && piece !== 'NORMAL'
+              const showsDamageCost = isDamageCostRaised && piece !== 'NORMAL' && !showsTrapLock
               return (
                 <button
                   type="button"
-                  className={`piece-button ${pieceInfo[piece].tone} ${usableSelectedPiece === piece ? 'is-selected' : ''}`}
+                  className={`piece-button ${pieceInfo[piece].tone} ${usableSelectedPiece === piece ? 'is-selected' : ''} ${showsTrapLock ? 'is-trap-locked' : ''} ${showsDamageCost ? 'is-damage-cost-raised' : ''}`}
                   key={piece}
                   disabled={disabled}
                   title={pieceInfo[piece].hint}
@@ -1954,7 +2634,19 @@ function App() {
                 >
                   <PieceIcon piece={piece} />
                   <span>{pieceInfo[piece].short}</span>
-                  <small>{piece === 'NORMAL' ? 'Free' : `SP${specialCost[piece]}`}</small>
+                  <small>
+                    {piece === 'NORMAL'
+                      ? 'Free'
+                      : cooldown > 0
+                      ? `CT${cooldown}`
+                      : `SP${getEffectiveSpecialCost(state, state.currentPlayer, piece)}`}
+                  </small>
+                  {showsTrapLock ? (
+                    <span className="trap-lock-overlay" aria-hidden="true">
+                      <Link2 />
+                    </span>
+                  ) : null}
+                  {showsDamageCost ? <span className="damage-cost-overlay" aria-hidden="true">+1</span> : null}
                 </button>
               )
             })}
@@ -1963,6 +2655,12 @@ function App() {
           {pendingBarrier ? (
             <button type="button" className="finish-barrier-button" onClick={finishBarrier}>
               アンカー選択を完了 ({pendingBarrier.selected.length}/2)
+            </button>
+          ) : null}
+
+          {pendingTrap ? (
+            <button type="button" className="finish-trap-button" onClick={finishTrap}>
+              罠選択を完了 ({pendingTrap.selected.length}/2)
             </button>
           ) : null}
 
@@ -1981,7 +2679,12 @@ function App() {
               <PieceIcon piece={usableSelectedPiece} />
               <div>
                 <strong>{activeInfo.label}</strong>
-                <span>Cost {specialCost[usableSelectedPiece]}</span>
+                <span>
+                  Cost {getEffectiveSpecialCost(state, state.currentPlayer, usableSelectedPiece)}
+                  {usableSelectedPiece !== 'NORMAL'
+                    ? ` / CT ${getCooldownRemaining(state, state.currentPlayer, usableSelectedPiece)}`
+                    : ''}
+                </span>
               </div>
             </div>
             <p>{activeInfo.hint}</p>
@@ -1994,7 +2697,9 @@ function App() {
               <li>黒が先手。黄色いリングの合法手だけに置けます。</li>
               <li>特殊駒も通常駒と同じく、相手を挟める場所にだけ置けます。</li>
               <li>置いた後に通常反転を行い、その後で特殊能力が1回だけ発動します。</li>
+              <li>常在型の能力は、その駒が自分の色で盤上に残っている限り自分のターン終了時に発動します。</li>
               <li>各プレイヤーはSP0から開始。自分のターンが来るたびにSPを1回復し、所持上限は5です。</li>
+              <li>能力は使用後、コスト値+1ターンのクールタイムになります。</li>
               <li>両者が打てなくなったら終局し、石数が多い方の勝ちです。</li>
             </ol>
           </section>
@@ -2035,6 +2740,14 @@ function getStatusMessage(state: MatchState, legalMoveCount: number) {
 
   if (state.passesInRow === 1) {
     return 'Opponent had no legal move and passed automatically.'
+  }
+
+  if (state.trapLockActive[state.currentPlayer]) {
+    return `${formatPlayer(state.currentPlayer)} is trapped: no natural SP recovery and abilities are disabled this turn.`
+  }
+
+  if (state.damageCostActive[state.currentPlayer]) {
+    return `${formatPlayer(state.currentPlayer)} has damage pressure: ability costs are +1 this turn.`
   }
 
   return `${formatPlayer(state.currentPlayer)} has ${legalMoveCount} legal moves.`
@@ -2136,19 +2849,7 @@ function PlayerCard({
       <span className={`mini-disc ${player.toLowerCase()}`} />
       <strong>{score}</strong>
       <div className="reserve-row">
-        <span>SP {sp}</span>
-        <span>R{specialCost.LANCE}</span>
-        <span>B{specialCost.BLAST}</span>
-        <span>A{specialCost.BARRIER}</span>
-        <span>S{specialCost.SEAL}</span>
-        <span>D{specialCost.DROP}</span>
-        <span>C{specialCost.CHARGE}</span>
-        <span>G{specialCost.DAMAGE}</span>
-        <span>X{specialCost.CROSS}</span>
-        <span>I{specialCost.DIAGONAL}</span>
-        <span>V{specialCost.DRAIN}</span>
-        <span>F{specialCost.FORT}</span>
-        <span>M{specialCost.BLOOM}</span>
+        <span className="sp-value">SP {sp}</span>
       </div>
       {currentPlayer === player ? <em>Your turn</em> : null}
     </section>
@@ -2158,16 +2859,31 @@ function PlayerCard({
 function DiscView({ disc }: { disc: Disc }) {
   const isInactiveCharge =
     disc.piece === 'CHARGE' && !disc.statuses.some((status) => status.type === 'CHARGE')
+  const isSilenced = disc.statuses.some((status) => status.type === 'SILENCE')
+  const hasTrap = disc.statuses.some((status) => status.type === 'TRAP')
+  const hasGuard = disc.statuses.some((status) => status.type === 'GUARD' || status.type === 'WARD')
 
   return (
     <span
       className={`disc ${disc.owner.toLowerCase()} ${pieceInfo[disc.piece].tone} ${
         isInactiveCharge ? 'inactive-charge' : ''
-      }`}
+      } ${isSilenced ? 'is-silenced' : ''}`}
     >
       {disc.piece !== 'NORMAL' ? <PieceIcon piece={disc.piece} /> : null}
+      {hasTrap ? (
+        <span className="trap-status-icon" aria-hidden="true">
+          <TriangleAlert />
+        </span>
+      ) : null}
+      {hasGuard ? (
+        <span className="guard-status-icon" aria-hidden="true">
+          <Shield />
+        </span>
+      ) : null}
       {disc.statuses.some((status) => status.type === 'GUARD') ? <i className="guard-badge" /> : null}
       {disc.statuses.some((status) => status.type === 'WARD') ? <i className="ward-badge" /> : null}
+      {disc.statuses.some((status) => status.type === 'SILENCE') ? <i className="silence-badge" /> : null}
+      {hasTrap ? <i className="trap-badge" /> : null}
     </span>
   )
 }
@@ -2180,11 +2896,11 @@ function PieceIcon({ piece }: { piece: PieceType }) {
   if (piece === 'DROP') return <CirclePlus aria-hidden="true" />
   if (piece === 'CHARGE') return <Gauge aria-hidden="true" />
   if (piece === 'DAMAGE') return <Flame aria-hidden="true" />
-  if (piece === 'CROSS') return <Crosshair aria-hidden="true" />
-  if (piece === 'DIAGONAL') return <Zap aria-hidden="true" />
-  if (piece === 'DRAIN') return <Magnet aria-hidden="true" />
-  if (piece === 'FORT') return <Shield aria-hidden="true" />
-  if (piece === 'BLOOM') return <Shuffle aria-hidden="true" />
+  if (piece === 'SILENCE') return <VolumeX aria-hidden="true" />
+  if (piece === 'TRAP') return <TriangleAlert aria-hidden="true" />
+  if (piece === 'GUARDIAN') return <Shield aria-hidden="true" />
+  if (piece === 'MINEFIELD') return <Bomb aria-hidden="true" />
+  if (piece === 'SNARE') return <Network aria-hidden="true" />
   return <span className="normal-dot" aria-hidden="true" />
 }
 
@@ -2215,12 +2931,12 @@ function AbilityPreview({ piece }: { piece: PieceType }) {
     SEAL: 'シール: 周囲の空きマスを相手だけ次ターンまで封鎖',
     DROP: 'ドロップ: ランダムな空きマスに自分の石を置く',
     CHARGE: 'チャージ: 発動時点でその石を持つプレイヤーのSPを1回復',
-    DAMAGE: 'ダメージ: 相手が置くとSP2を失うマスを作る',
-    CROSS: 'クロス: 上下左右の射線で最初の相手石を返す',
-    DIAGONAL: 'ダイア: 斜めライン上の相手石をまとめて返す',
-    DRAIN: 'ドレイン: 相手SPを最大2奪って自分SPにする',
-    FORT: 'フォート: 周囲の自分石を守り、前後左右をダメージ化',
-    BLOOM: 'ブルーム: 周囲の空きマスに自分の通常石を最大3つ増やす',
+    DAMAGE: 'ダメージ: 相手が置くと次ターンの能力コスト+1',
+    SILENCE: 'サイレンス: 円形範囲20マスの相手能力・盤面効果を封印',
+    TRAP: 'トラップ: 返した相手の次ターンのSP自然回復と能力使用を封じる',
+    GUARDIAN: 'ガーディアン: 存在中、自ターン終了時に自分の石2つへバリア',
+    MINEFIELD: 'マイン: 存在中、自ターン終了時に空きマス1つをダメージ化',
+    SNARE: 'スネア: 存在中、自ターン終了時に通常の自分石1つへ罠',
   }
 
   return (
@@ -2301,52 +3017,62 @@ function getPreviewCells(piece: PieceType) {
   }
 
   if (piece === 'DAMAGE') {
+    set(6, 'preview-damage')
     set(7, 'preview-damage')
+    set(8, 'preview-damage')
     set(11, 'preview-damage')
     set(12, 'preview-disc black preview-new', 'DAMAGE')
     set(13, 'preview-damage')
+    set(16, 'preview-damage')
     set(17, 'preview-damage')
+    set(18, 'preview-damage')
     return empty
   }
 
-  if (piece === 'CROSS') {
-    set(7, 'preview-disc white preview-extra')
-    set(11, 'preview-disc white preview-extra')
-    set(12, 'preview-disc black preview-new', 'CROSS')
-    set(13, 'preview-disc white preview-extra')
-    set(17, 'preview-disc white preview-extra')
+  if (piece === 'SILENCE') {
+    set(6, 'preview-silence')
+    set(7, 'preview-silence')
+    set(8, 'preview-silence')
+    set(11, 'preview-silence')
+    set(12, 'preview-disc black preview-new', 'SILENCE')
+    set(13, 'preview-silence')
+    set(16, 'preview-silence')
+    set(17, 'preview-silence')
+    set(18, 'preview-silence')
     return empty
   }
 
-  if (piece === 'DIAGONAL') {
-    set(6, 'preview-disc white preview-extra')
-    set(8, 'preview-disc white preview-extra')
-    set(12, 'preview-disc black preview-new', 'DIAGONAL')
-    set(16, 'preview-disc white preview-extra')
-    set(18, 'preview-disc white preview-extra')
+  if (piece === 'TRAP') {
+    set(7, 'preview-disc black preview-trap')
+    set(12, 'preview-disc black preview-new', 'TRAP')
+    set(17, 'preview-disc black preview-trap')
+    set(22, 'preview-arrow')
     return empty
   }
 
-  if (piece === 'DRAIN') {
-    set(7, 'preview-plus')
-    set(12, 'preview-disc black preview-new', 'DRAIN')
-    set(17, 'preview-damage')
-    return empty
-  }
-
-  if (piece === 'FORT') {
-    set(7, 'preview-disc black preview-ward')
-    set(11, 'preview-disc black preview-ward')
-    set(12, 'preview-disc black preview-new', 'FORT')
+  if (piece === 'GUARDIAN') {
+    set(6, 'preview-disc black preview-ward')
+    set(12, 'preview-disc black preview-new preview-aura', 'GUARDIAN')
     set(13, 'preview-disc black preview-ward')
-    set(17, 'preview-disc black preview-ward')
+    set(18, 'preview-disc black preview-ward')
+    set(22, 'preview-arrow')
     return empty
   }
 
-  if (piece === 'BLOOM') {
-    set(6, 'preview-random')
-    set(12, 'preview-disc black preview-new', 'BLOOM')
-    set(18, 'preview-disc black preview-new')
+  if (piece === 'MINEFIELD') {
+    set(6, 'preview-damage')
+    set(12, 'preview-disc black preview-new preview-aura', 'MINEFIELD')
+    set(16, 'preview-damage')
+    set(18, 'preview-damage')
+    set(22, 'preview-arrow')
+    return empty
+  }
+
+  if (piece === 'SNARE') {
+    set(6, 'preview-disc black preview-trap')
+    set(12, 'preview-disc black preview-new preview-aura', 'SNARE')
+    set(16, 'preview-disc black preview-trap')
+    set(18, 'preview-disc black preview-trap')
     set(22, 'preview-arrow')
     return empty
   }

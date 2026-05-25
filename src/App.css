@@ -238,24 +238,24 @@ button:focus-visible {
   background: #be123c;
 }
 
-.deck-slot.cross {
-  background: #2563eb;
+.deck-slot.silence {
+  background: #4f46e5;
 }
 
-.deck-slot.diagonal {
-  background: #9333ea;
+.deck-slot.trap {
+  background: #a16207;
 }
 
-.deck-slot.drain {
-  background: #0f766e;
+.deck-slot.guardian {
+  background: #0369a1;
 }
 
-.deck-slot.fort {
-  background: #475569;
+.deck-slot.minefield {
+  background: #991b1b;
 }
 
-.deck-slot.bloom {
-  background: #16a34a;
+.deck-slot.snare {
+  background: #92400e;
 }
 
 .deck-card-grid {
@@ -392,6 +392,15 @@ button:focus-visible {
   font-size: 0.78rem;
   font-weight: 800;
   text-align: center;
+}
+
+.reserve-row .sp-value {
+  min-width: 78px;
+  padding: 7px 12px;
+  color: #ffffff;
+  background: #2878e8;
+  font-size: 1.08rem;
+  font-weight: 950;
 }
 
 .rail-card {
@@ -625,6 +634,40 @@ button:focus-visible {
   content: "✓";
 }
 
+.cell.is-trap-target {
+  background: #fff3d4;
+}
+
+.cell.is-trap-target::before {
+  content: "罠";
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #a16207;
+  box-shadow: 0 3px 8px rgba(15, 23, 42, 0.28);
+  font-size: 0.85rem;
+  font-weight: 900;
+}
+
+.cell.is-trap-target:hover {
+  background: #ffe9ae;
+}
+
+.cell.is-trap-selected {
+  background: #fde68a;
+  box-shadow: inset 0 0 0 4px #a16207;
+}
+
+.cell.is-trap-selected::before {
+  content: "✓";
+}
+
 .cell.is-placement-blocked {
   background:
     repeating-linear-gradient(
@@ -691,14 +734,76 @@ button:focus-visible {
   border-color: #1f2937;
 }
 
+.cell.is-damage-silenced {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(79, 70, 229, 0.22) 0 5px,
+      transparent 5px 12px
+    ),
+    #dbe0f6;
+}
+
+.cell.is-damage-silenced::before {
+  opacity: 0.34;
+  filter: grayscale(1);
+}
+
+.cell.is-silence-zone {
+  box-shadow:
+    inset 0 0 0 3px rgba(79, 70, 229, 0.34),
+    inset 0 0 18px rgba(99, 102, 241, 0.12);
+}
+
+.cell.silence-edge-top {
+  border-top: 3px solid rgba(79, 70, 229, 0.72);
+}
+
+.cell.silence-edge-right {
+  border-right: 3px solid rgba(79, 70, 229, 0.72);
+}
+
+.cell.silence-edge-bottom {
+  border-bottom: 3px solid rgba(79, 70, 229, 0.72);
+}
+
+.cell.silence-edge-left {
+  border-left: 3px solid rgba(79, 70, 229, 0.72);
+}
+
+.silence-zone-ring {
+  position: absolute;
+  inset: 8%;
+  z-index: 1;
+  border: 2px solid rgba(79, 70, 229, 0.48);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, rgba(99, 102, 241, 0.2), transparent 58%),
+    repeating-linear-gradient(
+      135deg,
+      rgba(79, 70, 229, 0.18) 0 4px,
+      transparent 4px 10px
+    );
+  box-shadow:
+    0 0 0 4px rgba(99, 102, 241, 0.08),
+    0 0 14px rgba(79, 70, 229, 0.22);
+  pointer-events: none;
+  animation: silence-zone-pulse 1.4s ease-in-out infinite alternate;
+}
+
 .cell.effect-flip::after,
 .cell.effect-guard::after,
 .cell.effect-ward::after,
 .cell.effect-block::after,
 .cell.effect-place::after,
 .cell.effect-charge::after,
+.cell.effect-silence::after,
+.cell.effect-silence-end::after,
 .cell.effect-combo::after,
-.cell.effect-damage::after {
+.cell.effect-damage::after,
+.cell.effect-trap::after,
+.cell.effect-trap-trigger::after,
+.cell.effect-trap-trigger::before {
   content: "";
   position: absolute;
   inset: 12%;
@@ -782,6 +887,65 @@ button:focus-visible {
     0 0 0 10px rgba(190, 18, 60, 0.16),
     0 0 24px rgba(244, 63, 94, 0.44);
   animation-name: damage-flare;
+}
+
+.cell.effect-silence::after {
+  inset: 18%;
+  border: 3px solid rgba(79, 70, 229, 0.62);
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.18), transparent 62%);
+  box-shadow:
+    0 0 0 6px rgba(79, 70, 229, 0.1),
+    0 0 18px rgba(99, 102, 241, 0.28);
+  animation-name: silence-wave;
+}
+
+.cell.effect-silence-end::after {
+  inset: -2%;
+  border: 4px solid rgba(79, 70, 229, 0.68);
+  background: transparent;
+  box-shadow:
+    0 0 0 8px rgba(99, 102, 241, 0.14),
+    inset 0 0 18px rgba(99, 102, 241, 0.2);
+  animation-name: silence-contract;
+}
+
+.cell.effect-trap::after {
+  inset: 6%;
+  border: 4px solid #a16207;
+  background:
+    radial-gradient(circle, rgba(251, 191, 36, 0.28), transparent 58%),
+    linear-gradient(135deg, transparent 42%, rgba(255, 255, 255, 0.78) 43% 48%, transparent 49%);
+  box-shadow:
+    0 0 0 10px rgba(161, 98, 7, 0.18),
+    0 0 24px rgba(245, 158, 11, 0.48);
+  animation-name: trap-snap;
+}
+
+.cell.effect-trap-trigger::before,
+.cell.effect-trap-trigger::after {
+  inset: 15% 10%;
+  border-radius: 10px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      #fef3c7 0 7px,
+      #713f12 7px 12px,
+      #fef3c7 12px 19px
+    );
+  border: 3px solid #713f12;
+  box-shadow:
+    0 0 0 7px rgba(161, 98, 7, 0.18),
+    0 0 22px rgba(245, 158, 11, 0.45);
+}
+
+.cell.effect-trap-trigger::before {
+  clip-path: polygon(0 0, 46% 0, 38% 50%, 46% 100%, 0 100%);
+  animation: trap-jaw-left 0.9s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.cell.effect-trap-trigger::after {
+  clip-path: polygon(54% 0, 100% 0, 100% 100%, 54% 100%, 62% 50%);
+  animation: trap-jaw-right 0.9s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 
 .cell.effect-combo::after {
@@ -961,6 +1125,135 @@ button:focus-visible {
   }
 }
 
+@keyframes silence-wave {
+  0% {
+    opacity: 0;
+    transform: scale(0.68);
+  }
+
+  24% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.34);
+  }
+}
+
+@keyframes silence-contract {
+  0% {
+    opacity: 0.9;
+    transform: scale(1.28);
+  }
+
+  72% {
+    opacity: 0.52;
+    transform: scale(0.72);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(0.28);
+  }
+}
+
+@keyframes silence-zone-pulse {
+  0% {
+    opacity: 0.42;
+    transform: scale(0.88);
+  }
+
+  100% {
+    opacity: 0.9;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes trap-snap {
+  0% {
+    opacity: 0;
+    transform: scale(1.24) rotate(18deg);
+  }
+
+  24% {
+    opacity: 1;
+    transform: scale(0.92) rotate(-6deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.36) rotate(-20deg);
+  }
+}
+
+@keyframes trap-jaw-left {
+  0% {
+    opacity: 0;
+    transform: translateX(-46%) scale(0.92) rotate(-8deg);
+  }
+
+  28% {
+    opacity: 1;
+    transform: translateX(-5%) scale(1.04) rotate(2deg);
+  }
+
+  48% {
+    opacity: 1;
+    transform: translateX(0) scale(1) rotate(0deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(2%) scale(0.82) rotate(3deg);
+  }
+}
+
+@keyframes trap-jaw-right {
+  0% {
+    opacity: 0;
+    transform: translateX(46%) scale(0.92) rotate(8deg);
+  }
+
+  28% {
+    opacity: 1;
+    transform: translateX(5%) scale(1.04) rotate(-2deg);
+  }
+
+  48% {
+    opacity: 1;
+    transform: translateX(0) scale(1) rotate(0deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(-2%) scale(0.82) rotate(-3deg);
+  }
+}
+
+@keyframes chain-drift {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 34px 34px;
+  }
+}
+
+@keyframes damage-cost-pulse {
+  0% {
+    opacity: 0.58;
+    transform: scale(0.98);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
 @keyframes combo-burst {
   0% {
     opacity: 0;
@@ -1033,11 +1326,50 @@ button:focus-visible {
   box-shadow: 0 2px 5px rgba(15, 23, 42, 0.32);
 }
 
+.disc .trap-status-icon svg {
+  top: -9%;
+  right: auto;
+  bottom: auto;
+  left: -9%;
+  width: 44%;
+  height: 44%;
+  padding: 6%;
+  border-color: #ffffff;
+  color: #ffffff;
+  background: #a16207;
+  box-shadow:
+    0 0 0 3px rgba(245, 158, 11, 0.28),
+    0 3px 8px rgba(15, 23, 42, 0.34);
+  z-index: 3;
+}
+
+.disc .guard-status-icon svg {
+  top: -9%;
+  right: -9%;
+  bottom: auto;
+  left: auto;
+  width: 44%;
+  height: 44%;
+  padding: 6%;
+  border-color: #ffffff;
+  color: #ffffff;
+  background: #1d4ed8;
+  box-shadow:
+    0 0 0 3px rgba(96, 165, 250, 0.28),
+    0 3px 8px rgba(15, 23, 42, 0.34);
+  z-index: 3;
+}
+
 .disc.inactive-charge svg {
   opacity: 0.34;
   filter: grayscale(1);
   background: #64748b;
   border-style: dashed;
+}
+
+.disc.is-silenced svg {
+  opacity: 0.34;
+  filter: grayscale(1);
 }
 
 .disc.black,
@@ -1101,38 +1433,52 @@ button:focus-visible {
   background: #be123c;
 }
 
-.disc.cross svg,
-.ability-icon.cross,
-.selected-piece.cross > svg {
-  background: #2563eb;
+.selected-piece.silence > svg {
+  background: #4f46e5;
 }
 
-.disc.diagonal svg,
-.ability-icon.diagonal,
-.selected-piece.diagonal > svg {
-  background: #9333ea;
+.disc.silence svg,
+.ability-icon.silence,
+.selected-piece.silence > svg {
+  background: #4f46e5;
 }
 
-.disc.drain svg,
-.ability-icon.drain,
-.selected-piece.drain > svg {
-  background: #0f766e;
+.disc.trap svg,
+.ability-icon.trap,
+.selected-piece.trap > svg {
+  background: #a16207;
 }
 
-.disc.fort svg,
-.ability-icon.fort,
-.selected-piece.fort > svg {
-  background: #475569;
+.disc.guardian svg,
+.ability-icon.guardian,
+.selected-piece.guardian > svg {
+  background: #0369a1;
 }
 
-.disc.bloom svg,
-.ability-icon.bloom,
-.selected-piece.bloom > svg {
-  background: #16a34a;
+.disc.minefield svg,
+.ability-icon.minefield,
+.selected-piece.minefield > svg {
+  background: #991b1b;
+}
+
+.disc.snare svg,
+.ability-icon.snare,
+.selected-piece.snare > svg {
+  background: #92400e;
+}
+
+.disc .trap-status-icon svg {
+  background: #a16207;
+}
+
+.disc .guard-status-icon svg {
+  background: #1d4ed8;
 }
 
 .guard-badge,
-.ward-badge {
+.ward-badge,
+.silence-badge,
+.trap-badge {
   position: absolute;
   inset: -4px;
   border-radius: inherit;
@@ -1145,6 +1491,18 @@ button:focus-visible {
 
 .ward-badge {
   border: 3px dashed rgba(124, 58, 166, 0.9);
+}
+
+.silence-badge {
+  border: 3px dotted rgba(79, 70, 229, 0.95);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.16);
+}
+
+.trap-badge {
+  border: 3px solid rgba(161, 98, 7, 0.95);
+  box-shadow:
+    0 0 0 4px rgba(245, 158, 11, 0.18),
+    inset 0 0 10px rgba(251, 191, 36, 0.2);
 }
 
 .mini-disc {
@@ -1165,6 +1523,14 @@ button:focus-visible {
   margin: 18px auto 0;
 }
 
+.piece-dock.is-trap-locked {
+  filter: saturate(0.86);
+}
+
+.piece-dock.is-damage-cost-raised {
+  filter: saturate(1.08);
+}
+
 .piece-button {
   position: relative;
   display: grid;
@@ -1175,6 +1541,7 @@ button:focus-visible {
   color: #334155;
   background: #ffffff;
   font-weight: 900;
+  overflow: hidden;
 }
 
 .piece-button svg {
@@ -1198,7 +1565,97 @@ button:focus-visible {
   background: #f8fafc;
 }
 
-.finish-barrier-button {
+.piece-button.is-trap-locked {
+  border-color: rgba(161, 98, 7, 0.48);
+  background:
+    linear-gradient(135deg, rgba(161, 98, 7, 0.12), rgba(248, 250, 252, 0.96)),
+    #f8fafc;
+}
+
+.piece-button.is-damage-cost-raised {
+  border-color: rgba(190, 18, 60, 0.52);
+  background:
+    radial-gradient(circle at 50% 16%, rgba(244, 63, 94, 0.18), transparent 42%),
+    linear-gradient(135deg, rgba(190, 18, 60, 0.1), rgba(255, 255, 255, 0.96)),
+    #ffffff;
+}
+
+.piece-button.is-damage-cost-raised::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: 1;
+  pointer-events: none;
+  border: 2px solid rgba(190, 18, 60, 0.62);
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 4px rgba(244, 63, 94, 0.08),
+    0 0 16px rgba(244, 63, 94, 0.22);
+  animation: damage-cost-pulse 0.95s ease-in-out infinite alternate;
+}
+
+.damage-cost-overlay {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 24px;
+  padding: 0 7px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 999px;
+  color: #ffffff;
+  background: #be123c;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.22);
+  font-size: 0.82rem;
+  font-weight: 950;
+  pointer-events: none;
+}
+
+.piece-button.is-trap-locked::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      transparent 0 12px,
+      rgba(113, 63, 18, 0.34) 12px 16px,
+      transparent 16px 30px
+    );
+  opacity: 0.74;
+  animation: chain-drift 1.45s linear infinite;
+}
+
+.trap-lock-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: #713f12;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.5), transparent 58%);
+  pointer-events: none;
+}
+
+.trap-lock-overlay svg {
+  width: 34px;
+  height: 34px;
+  padding: 5px;
+  border: 2px solid rgba(255, 255, 255, 0.88);
+  border-radius: 999px;
+  background: rgba(161, 98, 7, 0.88);
+  color: #ffffff;
+  stroke-width: 3;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.24);
+}
+
+.finish-barrier-button,
+.finish-trap-button {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1212,6 +1669,14 @@ button:focus-visible {
 
 .finish-barrier-button:hover {
   background: #6b2f93;
+}
+
+.finish-trap-button {
+  background: #a16207;
+}
+
+.finish-trap-button:hover {
+  background: #854d0e;
 }
 
 .normal-dot {
@@ -1328,24 +1793,28 @@ button:focus-visible {
   background: #be123c;
 }
 
-.selected-piece.cross > svg {
-  background: #2563eb;
+.selected-piece.drop > svg {
+  background: #0891b2;
 }
 
-.selected-piece.diagonal > svg {
-  background: #9333ea;
+.selected-piece.silence > svg {
+  background: #4f46e5;
 }
 
-.selected-piece.drain > svg {
-  background: #0f766e;
+.selected-piece.trap > svg {
+  background: #a16207;
 }
 
-.selected-piece.fort > svg {
-  background: #475569;
+.selected-piece.guardian > svg {
+  background: #0369a1;
 }
 
-.selected-piece.bloom > svg {
-  background: #16a34a;
+.selected-piece.minefield > svg {
+  background: #991b1b;
+}
+
+.selected-piece.snare > svg {
+  background: #92400e;
 }
 
 .selected-piece strong,
@@ -1468,24 +1937,24 @@ button:focus-visible {
   background: #be123c;
 }
 
-.ability-preview.cross .preview-cell svg {
-  background: #2563eb;
+.ability-preview.silence .preview-cell svg {
+  background: #4f46e5;
 }
 
-.ability-preview.diagonal .preview-cell svg {
-  background: #9333ea;
+.ability-preview.trap .preview-cell svg {
+  background: #a16207;
 }
 
-.ability-preview.drain .preview-cell svg {
-  background: #0f766e;
+.ability-preview.guardian .preview-cell svg {
+  background: #0369a1;
 }
 
-.ability-preview.fort .preview-cell svg {
-  background: #475569;
+.ability-preview.minefield .preview-cell svg {
+  background: #991b1b;
 }
 
-.ability-preview.bloom .preview-cell svg {
-  background: #16a34a;
+.ability-preview.snare .preview-cell svg {
+  background: #92400e;
 }
 
 .preview-new {
@@ -1500,6 +1969,9 @@ button:focus-visible {
 .preview-random::after,
 .preview-plus::after,
 .preview-damage::after,
+.preview-silence::after,
+.preview-trap::after,
+.preview-aura::after,
 .preview-arrow::after {
   position: absolute;
   display: grid;
@@ -1560,9 +2032,27 @@ button:focus-visible {
 }
 
 .preview-damage::after {
-  content: "-2";
+  content: "+1";
   color: #ffffff;
   background: #be123c;
+}
+
+.preview-silence::after {
+  content: "封";
+  color: #ffffff;
+  background: #4f46e5;
+}
+
+.preview-trap::after {
+  content: "罠";
+  color: #ffffff;
+  background: #a16207;
+}
+
+.preview-aura::after {
+  content: "毎";
+  color: #ffffff;
+  background: #0f172a;
 }
 
 .preview-arrow::after {
@@ -1772,6 +2262,11 @@ button:focus-visible {
   .cell.effect-place::after,
   .cell.effect-charge::after,
   .cell.effect-damage::after,
+  .cell.effect-silence::after,
+  .cell.effect-silence-end::after,
+  .cell.effect-trap::after,
+  .cell.effect-trap-trigger::after,
+  .cell.effect-trap-trigger::before,
   .cell.effect-combo::after,
   .cell.effect-combo::before {
     animation-duration: 0.01ms;
