@@ -9,6 +9,7 @@ import {
   Flag,
   Flame,
   Gauge,
+  Globe2,
   Link2,
   Menu,
   Network,
@@ -23,7 +24,7 @@ import {
 import './App.css'
 
 type Player = 'BLACK' | 'WHITE'
-type AppPage = 'deck' | 'game'
+type AppPage = 'menu' | 'local-settings' | 'ability-setup' | 'game'
 type GameMode = 'local' | 'cpu'
 type PieceType =
   | 'NORMAL'
@@ -130,6 +131,7 @@ type PendingTrap = {
 
 type MatchState = {
   board: Cell[]
+  rules: GameRules
   currentPlayer: Player
   turn: number
   passesInRow: 0 | 1 | 2
@@ -146,6 +148,12 @@ type MatchState = {
   trapLockActive: Record<Player, boolean>
   damageCostPending: Record<Player, number>
   damageCostActive: Record<Player, boolean>
+}
+
+type GameRules = {
+  maxSpecialPoints: number
+  maxDeckSize: number
+  cooldownsEnabled: boolean
 }
 
 type PlacementBlock = {
@@ -186,7 +194,28 @@ const defaultDecks: Record<Player, SpecialPiece[]> = {
   BLACK: ['SEAL', 'DAMAGE', 'BARRIER'],
   WHITE: ['CHARGE', 'BLAST', 'LANCE'],
 }
-const maxDeckSize = 3
+const defaultGameRules: GameRules = {
+  maxSpecialPoints: 5,
+  maxDeckSize: 3,
+  cooldownsEnabled: true,
+}
+
+const initialCustomRules: GameRules = {
+  maxSpecialPoints: 8,
+  maxDeckSize: 5,
+  cooldownsEnabled: false,
+}
+
+function clampRuleValue(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+function limitDecks(decks: Record<Player, SpecialPiece[]>, limit: number): Record<Player, SpecialPiece[]> {
+  return {
+    BLACK: decks.BLACK.slice(0, limit),
+    WHITE: decks.WHITE.slice(0, limit),
+  }
+}
 const directions: Direction[] = [-1, 0, 1].flatMap((dy) =>
   [-1, 0, 1]
     .filter((dx) => dx !== 0 || dy !== 0)
@@ -194,8 +223,6 @@ const directions: Direction[] = [-1, 0, 1].flatMap((dy) =>
 )
 const columns = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
 const rows = ['1', '2', '3', '4', '5', '6', '7', '8']
-const maxSpecialPoints = 5
-
 const specialCost: Record<PieceType, number> = {
   NORMAL: 0,
   LANCE: 5,
@@ -287,7 +314,7 @@ const pieceInfo: Record<
     short: 'Q',
     tone: 'silence',
     summary: '相手の能力と盤面効果を一時的に封印します。',
-    hint: '配置時、円形範囲20マスにある相手の能力駒、バリア、罠、自分に効く相手のダメージマスを、相手のターン終了時まで封印します。封印範囲内に相手の能力駒が新たに置かれた場合も、その能力は無効になります。コンボ時も同じ効果が発動します。',
+    hint: '配置時、円形範囲20マスにある相手の能力駒、バリア、罠、自分に効く相手のダメージマスを次の自分のターン終了時まで封印します。封印範囲内に相手が新たに置いた能力駒の無効化は相手のターン終了時まで続きます。コンボ時も同じ効果が発動します。',
   },
   TRAP: {
     label: 'トラップ',
@@ -330,7 +357,7 @@ const positionWeights = [
   [120, -35, 20, 5, 5, 20, -35, 120],
 ]
 
-function createInitialState(): MatchState {
+function createInitialState(rules: GameRules = defaultGameRules): MatchState {
   const board = Array.from({ length: boardSize * boardSize }, (_, index) => {
     const coord = indexToCoord(index)
     let disc: Disc | null = null
@@ -348,6 +375,7 @@ function createInitialState(): MatchState {
 
   return {
     board,
+    rules: { ...rules },
     currentPlayer: 'BLACK',
     turn: 1,
     passesInRow: 0,
@@ -495,9 +523,12 @@ function getCooldownRemaining(state: MatchState, player: Player, piece: SpecialP
 
 function spendSpecialCostAndSetCooldown(state: MatchState, player: Player, piece: SpecialPiece) {
   state.specialPoints[player] -= getEffectiveSpecialCost(state, player, piece)
-  state.cooldowns[player] = {
-    ...state.cooldowns[player],
-    [piece]: specialCost[piece] + 1,
+
+  if (state.rules.cooldownsEnabled) {
+    state.cooldowns[player] = {
+      ...state.cooldowns[player],
+      [piece]: specialCost[piece] + 1,
+    }
   }
 }
 
@@ -948,6 +979,7 @@ function chooseRandomCoord(targets: Coord[]) {
 function cloneState(state: MatchState): MatchState {
   return {
     ...state,
+    rules: { ...state.rules },
     board: state.board.map((cell) => ({
       coord: { ...cell.coord },
       disc: cell.disc
@@ -1376,7 +1408,8 @@ function resolveDamage(state: MatchState, move: MoveResult): SpecialResult {
 function resolveSilence(state: MatchState, move: Coord): SpecialResult {
   const range = getSilenceRange(state, move)
   const opponent = getOpponent(state.currentPlayer)
-  const expiresAtTurn = state.turn + 1
+  const zoneExpiresAtTurn = state.turn + 1
+  const statusExpiresAtTurn = state.turn + 2
   const targets = getSilenceTargets(state, move)
   const rangeKeys = new Set(range.map((coord) => `${coord.x}-${coord.y}`))
 
@@ -1385,7 +1418,7 @@ function resolveSilence(state: MatchState, move: Coord): SpecialResult {
     {
       coords: range,
       silencedPlayer: opponent,
-      expiresAtTurn,
+      expiresAtTurn: zoneExpiresAtTurn,
     },
   ]
 
@@ -1397,7 +1430,7 @@ function resolveSilence(state: MatchState, move: Coord): SpecialResult {
     }
 
     disc.statuses = disc.statuses.filter((status) => status.type !== 'SILENCE')
-    disc.statuses.push({ type: 'SILENCE', expiresAtTurn })
+    disc.statuses.push({ type: 'SILENCE', expiresAtTurn: statusExpiresAtTurn })
   }
 
   const silencedDamageCells = state.damageCells
@@ -1407,7 +1440,7 @@ function resolveSilence(state: MatchState, move: Coord): SpecialResult {
         rangeKeys.has(`${cell.coord.x}-${cell.coord.y}`),
     )
     .map((cell) => {
-      cell.silenceExpiresAtTurn = expiresAtTurn
+      cell.silenceExpiresAtTurn = statusExpiresAtTurn
       return cell.coord
     })
 
@@ -1916,7 +1949,7 @@ function createAuraEvent(
 }
 
 function recoverSpecialPoint(state: MatchState, player: Player) {
-  state.specialPoints[player] = Math.min(maxSpecialPoints, state.specialPoints[player] + 1)
+  state.specialPoints[player] = Math.min(state.rules.maxSpecialPoints, state.specialPoints[player] + 1)
 }
 
 function expireTurnState(state: MatchState) {
@@ -2034,8 +2067,11 @@ function coordToPercent(value: number) {
 }
 
 function App() {
-  const [page, setPage] = useState<AppPage>('game')
-  const [state, setState] = useState(createInitialState)
+  const [page, setPage] = useState<AppPage>('menu')
+  const [rules, setRules] = useState<GameRules>(defaultGameRules)
+  const [customRules, setCustomRules] = useState<GameRules>(initialCustomRules)
+  const [pendingRules, setPendingRules] = useState<GameRules>(defaultGameRules)
+  const [state, setState] = useState(() => createInitialState(defaultGameRules))
   const [mode, setMode] = useState<GameMode>('local')
   const [decks, setDecks] = useState<Record<Player, SpecialPiece[]>>(defaultDecks)
   const [selectedPiece, setSelectedPiece] = useState<PieceType>('NORMAL')
@@ -2145,6 +2181,7 @@ function App() {
   )
   const currentDeck = decks[state.currentPlayer]
   const cpuDeck = decks.WHITE
+  const deckBuilderLimit = page === 'ability-setup' ? pendingRules.maxDeckSize : customRules.maxDeckSize
   const isTrapLocked = state.trapLockActive[state.currentPlayer]
   const isDamageCostRaised = state.damageCostActive[state.currentPlayer]
   const usableSelectedPiece =
@@ -2351,13 +2388,27 @@ function App() {
     setHoveredMoveKey(null)
   }, [pendingTrap, state])
 
-  function resetGame(nextMode = mode) {
-    setState(createInitialState())
+  function resetGame(nextMode = mode, nextRules = rules) {
+    const limitedDecks = limitDecks(decks, nextRules.maxDeckSize)
+
+    setRules(nextRules)
+    setDecks(limitedDecks)
+    setState(createInitialState(nextRules))
     setSelectedPiece('NORMAL')
     setPendingBarrier(null)
     setPendingTrap(null)
     setHoveredMoveKey(null)
     setMode(nextMode)
+  }
+
+  function startGame(nextMode: GameMode, nextRules = rules) {
+    resetGame(nextMode, nextRules)
+    setPage('game')
+  }
+
+  function openAbilitySetup(nextRules: GameRules) {
+    setPendingRules(nextRules)
+    setPage('ability-setup')
   }
 
   function toggleDeckPiece(player: Player, piece: SpecialPiece) {
@@ -2371,7 +2422,7 @@ function App() {
         }
       }
 
-      if (selected.length >= maxDeckSize) {
+      if (selected.length >= deckBuilderLimit) {
         return current
       }
 
@@ -2382,9 +2433,17 @@ function App() {
     })
   }
 
-  function startDeckGame() {
-    resetGame(mode)
-    setPage('game')
+  function goToMenu() {
+    if (page === 'game' && !window.confirm('現在の対戦を終了してメニューに戻りますか？')) {
+      return
+    }
+
+    setDecks(defaultDecks)
+    setSelectedPiece('NORMAL')
+    setPendingBarrier(null)
+    setPendingTrap(null)
+    setHoveredMoveKey(null)
+    setPage('menu')
   }
 
   return (
@@ -2399,17 +2458,38 @@ function App() {
         </div>
 
         <div className="turn-strip">
-          <span className={`mini-disc ${state.currentPlayer.toLowerCase()}`} />
-          <div>
-            <strong>Turn {state.turn}</strong>
-            <span>{isGameOver ? 'Game ended' : `${formatPlayer(state.currentPlayer)} to move`}</span>
-          </div>
+          {page === 'game' ? (
+            <>
+              <span className={`mini-disc ${state.currentPlayer.toLowerCase()}`} />
+              <div>
+                <strong>Turn {state.turn}</strong>
+                <span>{isGameOver ? 'Game ended' : `${formatPlayer(state.currentPlayer)} to move`}</span>
+              </div>
+            </>
+          ) : (
+            <div>
+              <strong>
+                {page === 'menu'
+                  ? 'Main Menu'
+                  : page === 'local-settings'
+                  ? 'Match Settings'
+                  : 'Ability Setup'}
+              </strong>
+              <span>
+                {page === 'menu'
+                  ? 'Select a match type'
+                  : page === 'local-settings'
+                  ? 'Choose match rules'
+                  : 'Build ability decks before the match'}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="top-actions">
-          <button type="button" onClick={() => setPage(page === 'deck' ? 'game' : 'deck')}>
-            <Settings aria-hidden="true" />
-            <span>{page === 'deck' ? 'Game' : 'Deck'}</span>
+          <button type="button" onClick={goToMenu}>
+            <Menu aria-hidden="true" />
+            <span>Menu</span>
           </button>
           <button type="button" onClick={() => resetGame()} title="Undo is not available yet">
             <RotateCcw aria-hidden="true" />
@@ -2422,8 +2502,31 @@ function App() {
         </div>
       </header>
 
-      {page === 'deck' ? (
-        <DeckBuilder decks={decks} onToggle={toggleDeckPiece} onStart={startDeckGame} />
+      {page === 'menu' ? (
+        <MainMenu
+          mode={mode}
+          onSelectMode={setMode}
+          onOpenLocalSettings={() => setPage('local-settings')}
+        />
+      ) : page === 'local-settings' ? (
+        <LocalMatchSettings
+          mode={mode}
+          defaultRules={defaultGameRules}
+          customRules={customRules}
+          onChangeCustomRules={setCustomRules}
+          onStartDefault={() => openAbilitySetup(defaultGameRules)}
+          onStartCustom={() => openAbilitySetup(customRules)}
+          onBackToMenu={goToMenu}
+        />
+      ) : page === 'ability-setup' ? (
+        <AbilitySetup
+          mode={mode}
+          rules={pendingRules}
+          decks={decks}
+          onToggleDeckPiece={toggleDeckPiece}
+          onBackToRules={() => setPage('local-settings')}
+          onStartGame={() => startGame(mode, pendingRules)}
+        />
       ) : (
       <section className="game-layout" aria-label="Special Reversi board">
         <aside className="left-rail">
@@ -2594,6 +2697,7 @@ function App() {
                       }
                     >
                       {isSilenceZone ? <span className="silence-zone-ring" aria-hidden="true" /> : null}
+                      {placementBlock ? <span className="block-badge" aria-hidden="true">禁</span> : null}
                       {cell.disc ? (
                         <DiscView disc={cell.disc} />
                       ) : isLegal ? (
@@ -2681,7 +2785,7 @@ function App() {
                 <strong>{activeInfo.label}</strong>
                 <span>
                   Cost {getEffectiveSpecialCost(state, state.currentPlayer, usableSelectedPiece)}
-                  {usableSelectedPiece !== 'NORMAL'
+                  {usableSelectedPiece !== 'NORMAL' && state.rules.cooldownsEnabled
                     ? ` / CT ${getCooldownRemaining(state, state.currentPlayer, usableSelectedPiece)}`
                     : ''}
                 </span>
@@ -2698,34 +2802,219 @@ function App() {
               <li>特殊駒も通常駒と同じく、相手を挟める場所にだけ置けます。</li>
               <li>置いた後に通常反転を行い、その後で特殊能力が1回だけ発動します。</li>
               <li>常在型の能力は、その駒が自分の色で盤上に残っている限り自分のターン終了時に発動します。</li>
-              <li>各プレイヤーはSP0から開始。自分のターンが来るたびにSPを1回復し、所持上限は5です。</li>
-              <li>能力は使用後、コスト値+1ターンのクールタイムになります。</li>
+              <li>
+                各プレイヤーはSP0から開始。自分のターンが来るたびにSPを1回復し、所持上限は
+                {state.rules.maxSpecialPoints}です。
+              </li>
+              <li>
+                {state.rules.cooldownsEnabled
+                  ? '能力は使用後、コスト値+1ターンのクールタイムになります。'
+                  : 'このルールでは能力のクールタイムはありません。'}
+              </li>
               <li>両者が打てなくなったら終局し、石数が多い方の勝ちです。</li>
             </ol>
           </section>
 
-          <section className="mode-card">
-            <button
-              type="button"
-              className={mode === 'local' ? 'is-active' : ''}
-              onClick={() => resetGame('local')}
-            >
-              <Users aria-hidden="true" />
-              Local
-            </button>
-            <button
-              type="button"
-              className={mode === 'cpu' ? 'is-active' : ''}
-              onClick={() => resetGame('cpu')}
-            >
-              <Bot aria-hidden="true" />
-              CPU
-            </button>
-          </section>
         </aside>
       </section>
       )}
     </main>
+  )
+}
+
+function MainMenu({
+  mode,
+  onSelectMode,
+  onOpenLocalSettings,
+}: {
+  mode: GameMode
+  onSelectMode: (mode: GameMode) => void
+  onOpenLocalSettings: () => void
+}) {
+  return (
+    <section className="main-menu-page" aria-label="Main menu">
+      <div className="main-menu-header">
+        <div>
+          <h1>Special Reversi</h1>
+          <p>デッキを組み、能力駒を使って盤面を制圧します。</p>
+        </div>
+      </div>
+
+      <div className="menu-mode-grid">
+        <button
+          type="button"
+          className={`menu-mode-card ${mode === 'local' ? 'is-selected' : ''}`}
+          onClick={() => {
+            onSelectMode('local')
+            onOpenLocalSettings()
+          }}
+        >
+          <span className="menu-mode-icon local">
+            <Users aria-hidden="true" />
+          </span>
+          <strong>ローカル対戦</strong>
+          <small>1台の端末で2人対戦</small>
+          <span>Open Match Settings</span>
+        </button>
+
+        <button
+          type="button"
+          className={`menu-mode-card ${mode === 'cpu' ? 'is-selected' : ''}`}
+          onClick={() => {
+            onSelectMode('cpu')
+            onOpenLocalSettings()
+          }}
+        >
+          <span className="menu-mode-icon cpu">
+            <Bot aria-hidden="true" />
+          </span>
+          <strong>ボット対戦</strong>
+          <small>CPU相手に能力デッキを試す</small>
+          <span>Open Match Settings</span>
+        </button>
+
+        <button type="button" className="menu-mode-card is-disabled" disabled>
+          <span className="menu-mode-icon online">
+            <Globe2 aria-hidden="true" />
+          </span>
+          <strong>ルーム対戦</strong>
+          <small>オンライン対戦用の入口</small>
+          <span>Coming Soon</span>
+        </button>
+      </div>
+
+      <section className="menu-status-panel" aria-label="Match setup">
+        <div>
+          <strong>Current Deck Rule</strong>
+          <span>通常ルールは最大3つ、カスタムルールでは上限を変更可能</span>
+        </div>
+        <div>
+          <strong>SP Rule</strong>
+          <span>初期SP0、ターン開始時に1回復、通常上限5</span>
+        </div>
+        <div>
+          <strong>Room Match Ready</strong>
+          <span>将来のルームID、マッチング、観戦導線を追加できる構成</span>
+        </div>
+      </section>
+    </section>
+  )
+}
+
+function LocalMatchSettings({
+  mode,
+  defaultRules,
+  customRules,
+  onChangeCustomRules,
+  onStartDefault,
+  onStartCustom,
+  onBackToMenu,
+}: {
+  mode: GameMode
+  defaultRules: GameRules
+  customRules: GameRules
+  onChangeCustomRules: (rules: GameRules) => void
+  onStartDefault: () => void
+  onStartCustom: () => void
+  onBackToMenu: () => void
+}) {
+  const updateCustomRule = (patch: Partial<GameRules>) => {
+    onChangeCustomRules({ ...customRules, ...patch })
+  }
+
+  return (
+    <section className="rules-page" aria-label="Local match settings">
+      <div className="rules-header">
+        <div>
+          <h1>{mode === 'local' ? 'ローカル対戦設定' : 'ボット対戦設定'}</h1>
+          <p>標準ルールかカスタムルールを選び、次の画面で能力構成を決めます。</p>
+        </div>
+        <button type="button" onClick={onBackToMenu}>
+          メニューに戻る
+        </button>
+      </div>
+
+      <div className="rules-grid">
+        <section className="rule-card">
+          <span className="rule-card-icon">
+            <Shield aria-hidden="true" />
+          </span>
+          <h2>デフォルトルール</h2>
+          <p>現在の基本バランスで対戦します。デッキは3つ、SP上限は5、クールタイムありです。</p>
+          <dl className="rule-summary">
+            <div>
+              <dt>最大SP</dt>
+              <dd>{defaultRules.maxSpecialPoints}</dd>
+            </div>
+            <div>
+              <dt>能力選択数</dt>
+              <dd>{defaultRules.maxDeckSize}</dd>
+            </div>
+            <div>
+              <dt>クールタイム</dt>
+              <dd>{defaultRules.cooldownsEnabled ? 'あり' : 'なし'}</dd>
+            </div>
+          </dl>
+          <button type="button" className="start-game-button" onClick={onStartDefault}>
+            ゲーム開始
+          </button>
+        </section>
+
+        <section className="rule-card custom-rule-card">
+          <span className="rule-card-icon custom">
+            <Settings aria-hidden="true" />
+          </span>
+          <h2>カスタムルール</h2>
+          <p>オリジナルの条件でローカル対戦を開始します。</p>
+
+          <label className="rule-control">
+            <span>最大所持SP</span>
+            <input
+              type="number"
+              min={3}
+              max={20}
+              value={customRules.maxSpecialPoints}
+              onChange={(event) =>
+                updateCustomRule({
+                  maxSpecialPoints: clampRuleValue(Number(event.target.value), 3, 20),
+                })
+              }
+            />
+          </label>
+
+          <label className="rule-control">
+            <span>能力選択数上限</span>
+            <input
+              type="number"
+              min={1}
+              max={specialPieces.length}
+              value={customRules.maxDeckSize}
+              onChange={(event) =>
+                updateCustomRule({
+                  maxDeckSize: clampRuleValue(Number(event.target.value), 1, specialPieces.length),
+                })
+              }
+            />
+          </label>
+
+          <label className="rule-toggle">
+            <input
+              type="checkbox"
+              checked={!customRules.cooldownsEnabled}
+              onChange={(event) => updateCustomRule({ cooldownsEnabled: !event.target.checked })}
+            />
+            <span>
+              <strong>クールタイムなし</strong>
+              <small>能力使用後すぐに再使用できるルールにします。</small>
+            </span>
+          </label>
+
+          <button type="button" className="start-game-button" onClick={onStartCustom}>
+            ゲーム開始
+          </button>
+        </section>
+      </div>
+    </section>
   )
 }
 
@@ -2753,76 +3042,147 @@ function getStatusMessage(state: MatchState, legalMoveCount: number) {
   return `${formatPlayer(state.currentPlayer)} has ${legalMoveCount} legal moves.`
 }
 
+function AbilitySetup({
+  mode,
+  rules,
+  decks,
+  onToggleDeckPiece,
+  onBackToRules,
+  onStartGame,
+}: {
+  mode: GameMode
+  rules: GameRules
+  decks: Record<Player, SpecialPiece[]>
+  onToggleDeckPiece: (player: Player, piece: SpecialPiece) => void
+  onBackToRules: () => void
+  onStartGame: () => void
+}) {
+  return (
+    <section className="rules-page" aria-label="Ability setup">
+      <div className="rules-header">
+        <div>
+          <h1>能力構成</h1>
+          <p>
+            {mode === 'local' ? 'ローカル対戦' : 'ボット対戦'}で使う能力駒を選びます。
+            このルールでは最大{rules.maxDeckSize}つまで選択できます。
+          </p>
+        </div>
+        <div className="rules-header-actions">
+          <button type="button" className="secondary-button" onClick={onBackToRules}>
+            ルールに戻る
+          </button>
+          <button type="button" className="start-game-button" onClick={onStartGame}>
+            対戦開始
+          </button>
+        </div>
+      </div>
+
+      <section className="menu-status-panel setup-rule-summary" aria-label="Selected rules">
+        <div>
+          <strong>最大SP</strong>
+          <span>{rules.maxSpecialPoints}</span>
+        </div>
+        <div>
+          <strong>能力選択数</strong>
+          <span>{rules.maxDeckSize}</span>
+        </div>
+        <div>
+          <strong>クールタイム</strong>
+          <span>{rules.cooldownsEnabled ? 'あり' : 'なし'}</span>
+        </div>
+      </section>
+
+      <DeckBuilder
+        decks={decks}
+        maxDeckSize={rules.maxDeckSize}
+        onToggle={onToggleDeckPiece}
+      />
+    </section>
+  )
+}
+
 function DeckBuilder({
   decks,
+  maxDeckSize,
   onToggle,
-  onStart,
 }: {
   decks: Record<Player, SpecialPiece[]>
+  maxDeckSize: number
   onToggle: (player: Player, piece: SpecialPiece) => void
-  onStart: () => void
 }) {
-  const canStart = decks.BLACK.length > 0 && decks.WHITE.length > 0
-
   return (
-    <section className="deck-page" aria-label="Deck builder">
+    <section className="deck-page setup-deck-page" aria-label="Ability deck selection">
       <div className="deck-header">
         <div>
-          <h1>Deck Builder</h1>
-          <p>各プレイヤーは能力駒を最大3つまで選択できます。</p>
+          <h1>能力選択</h1>
+          <p>ゲーム開始前に、各プレイヤーの能力駒を最大{maxDeckSize}つまで選択します。</p>
         </div>
-        <button type="button" className="start-game-button" disabled={!canStart} onClick={onStart}>
-          Start Game
-        </button>
       </div>
 
       <div className="deck-columns">
-        {(['BLACK', 'WHITE'] as Player[]).map((player) => (
-          <section className="deck-panel" key={player}>
-            <div className="deck-panel-header">
-              <span className={`mini-disc ${player.toLowerCase()}`} />
-              <div>
-                <h2>{player === 'BLACK' ? 'Player 1 Deck' : 'Player 2 Deck'}</h2>
-                <p>{decks[player].length}/{maxDeckSize}</p>
+        {(['BLACK', 'WHITE'] as Player[]).map((player) => {
+          const visibleDeck = decks[player].slice(0, maxDeckSize)
+
+          return (
+            <section className="deck-panel" key={player}>
+              <div className="deck-panel-header">
+                <span className={`mini-disc ${player.toLowerCase()}`} />
+                <div>
+                  <h2>{player === 'BLACK' ? 'Player 1 Deck' : 'Player 2 Deck'}</h2>
+                  <p>{visibleDeck.length}/{maxDeckSize}</p>
+                </div>
               </div>
-            </div>
 
-            <div className="deck-slots" aria-label={`${formatPlayer(player)} selected deck`}>
-              {Array.from({ length: maxDeckSize }).map((_, index) => {
-                const piece = decks[player][index]
-                return (
-                  <span className={`deck-slot ${piece ? pieceInfo[piece].tone : ''}`} key={`${player}-${index}`}>
-                    {piece ? <PieceIcon piece={piece} /> : null}
-                  </span>
-                )
-              })}
-            </div>
-
-            <div className="deck-card-grid">
-              {specialPieces.map((piece) => {
-                const selected = decks[player].includes(piece)
-                const locked = !selected && decks[player].length >= maxDeckSize
-
-                return (
-                  <button
-                    type="button"
-                    className={`deck-card ${pieceInfo[piece].tone} ${selected ? 'is-selected' : ''}`}
-                    key={`${player}-${piece}`}
-                    disabled={locked}
-                    onClick={() => onToggle(player, piece)}
-                  >
-                    <span className={`ability-icon ${pieceInfo[piece].tone}`}>
-                      <PieceIcon piece={piece} />
+              <div
+                className="deck-slots"
+                style={{ gridTemplateColumns: `repeat(${maxDeckSize}, minmax(0, 1fr))` }}
+                aria-label={`${formatPlayer(player)} selected deck`}
+              >
+                {Array.from({ length: maxDeckSize }).map((_, index) => {
+                  const piece = visibleDeck[index]
+                  return (
+                    <span className={`deck-slot ${piece ? pieceInfo[piece].tone : ''}`} key={`${player}-${index}`}>
+                      {piece ? <PieceIcon piece={piece} /> : null}
                     </span>
-                    <strong>{pieceInfo[piece].label}</strong>
-                    <small>SP{specialCost[piece]}</small>
-                    <span>{pieceInfo[piece].summary}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </section>
-        ))}
+                  )
+                })}
+              </div>
+
+              <div className="deck-card-grid">
+                {specialPieces.map((piece) => {
+                  const selected = visibleDeck.includes(piece)
+                  const locked = !selected && visibleDeck.length >= maxDeckSize
+
+                  return (
+                    <button
+                      type="button"
+                      className={`deck-card ${pieceInfo[piece].tone} ${selected ? 'is-selected' : ''} ${
+                        locked ? 'is-locked' : ''
+                      }`}
+                      key={`${player}-${piece}`}
+                      aria-disabled={locked}
+                      onClick={() => {
+                        if (!locked) {
+                          onToggle(player, piece)
+                        }
+                      }}
+                    >
+                      <span className={`ability-icon ${pieceInfo[piece].tone}`}>
+                        <PieceIcon piece={piece} />
+                      </span>
+                      <strong>{pieceInfo[piece].label}</strong>
+                      <small>SP{specialCost[piece]}</small>
+                      <span className="deck-card-summary">{pieceInfo[piece].summary}</span>
+                      <span className="deck-card-detail" role="tooltip">
+                        {pieceInfo[piece].hint}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </section>
+          )
+        })}
       </div>
     </section>
   )
